@@ -1,6 +1,7 @@
 # The worker needs the exact same environment as the API
 FROM python:3.11-slim
 
+# Set the working directory
 WORKDIR /app
 
 # Use the same secure command from Dockerfile.api
@@ -9,5 +10,12 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y \
     libgdal-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Copy the requirements file
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+
+# Set a global timeout and install dependencies in a single, atomic step
+RUN pip config set global.timeout 60 && \
+    pip install \
+        --no-cache-dir \
+        --timeout=100 \
+        -r requirements.txt
