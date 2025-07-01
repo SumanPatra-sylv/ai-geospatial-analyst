@@ -1,0 +1,85 @@
+services:
+  redis:
+    image: "redis:alpine"
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  postgres:
+    image: "postgis/postgis:16-3.4"
+    environment:
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=gis_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  minio:
+    image: "minio/minio:latest"
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000" # API port
+      - "9001:9001" # Console port
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    volumes:
+      - minio_data:/data
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090" # Prometheus UI port
+    volumes:
+      - ./prometheus:/etc/prometheus
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+    depends_on:
+      - api
+      - worker
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    command: uvicorn backend.api.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - ./backend:/app/backend
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+      - postgres
+      - minio
+    environment:
+      - REDIS_HOST=redis
+      - POSTGRES_HOST=postgres
+      - MINIO_HOST=minio
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    # <-- THIS LINE IS UPDATED
+    command: celery -A backend.worker.celery_app.celery worker --loglevel=info --autoscale=10,2
+    volumes:
+      - ./backend:/app/backend
+    ports:
+      - "8001:8001" # Expose port for Prometheus to scrape metrics
+    depends_on:
+      - redis
+      - api # Worker needs the same code as the API
+    environment:
+      - REDIS_HOST=redis
+      - POSTGRES_HOST=postgres
+      - MINIO_HOST=minio
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  prometheus_data:

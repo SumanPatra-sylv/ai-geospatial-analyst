@@ -1,0 +1,13 @@
+# The worker needs the exact same environment as the API
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Use the same secure command from Dockerfile.api
+RUN apt-get update && apt-get upgrade -y && apt-get install -y \
+    build-essential \
+    libgdal-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
