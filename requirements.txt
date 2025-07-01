@@ -22,7 +22,8 @@ SQLAlchemy       # ORM for interacting with the database
 GeoAlchemy2      # Adds geospatial types to SQLAlchemy
 minio            # Python client for MinIO
 boto3            # Required by the minio client
-
+rasterio
+rasterstats
 # --- Frontend ---
 streamlit
 # Note: We don't need streamlit_folium if maps are generated
