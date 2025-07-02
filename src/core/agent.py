@@ -1,4 +1,4 @@
-# backend/core/agent.py - FIXED
+# src/core/agent.py - FIXED
 """
 Geospatial AI Agent using LangGraph
 This module defines the agent graph that processes geospatial queries.

@@ -1,4 +1,4 @@
-# app.py (Refactored Frontend - Pure API Client)
+# app.py (Refactored Frontend - Pure API Client) - FIXED VERSION
 
 import streamlit as st
 import requests
@@ -15,14 +15,15 @@ import json
 
 # FastAPI backend configuration
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
-API_BASE = f"{BACKEND_URL}/api/v1"
+# FIXED: The base path for job-related endpoints is /jobs, not /api/v1
+API_BASE = f"{BACKEND_URL}/jobs"
 
 # ==============================================================================
 # 2. API CLIENT CLASS
 # ==============================================================================
 
 class GeospatialAPIClient:
-    """API client for communicating with the FastAPI backend."""
+    """API client for communicating with the FastAPI src."""
     
     def __init__(self, base_url=API_BASE):
         self.base_url = base_url
@@ -31,15 +32,17 @@ class GeospatialAPIClient:
     def health_check(self):
         """Check if the backend is healthy."""
         try:
-            response = self.session.get(f"{self.base_url}/health", timeout=5)
+            # This is correct - it calls the root /health endpoint
+            response = self.session.get(f"{BACKEND_URL}/health", timeout=5)
             return response.status_code == 200
         except Exception:
             return False
     
     def get_status(self):
-        """Get current backend status."""
+        """Get current backend jobs router status."""
         try:
-            response = self.session.get(f"{self.base_url}/status")
+            # FIXED: Call the available /jobs/health endpoint instead of /api/v1/status
+            response = self.session.get(f"{self.base_url}/health")
             response.raise_for_status()
             return response.json()
         except Exception as e:
@@ -52,8 +55,9 @@ class GeospatialAPIClient:
             if session_id:
                 payload["session_id"] = session_id
             
+            # FIXED: The correct endpoint is /jobs/start, not /api/v1/query
             response = self.session.post(
-                f"{self.base_url}/query", 
+                f"{self.base_url}/start", 
                 json=payload,
                 timeout=300  # 5 minute timeout for complex queries
             )
@@ -63,9 +67,10 @@ class GeospatialAPIClient:
             return {"error": str(e), "success": False}
     
     def upload_file(self, file_data, filename):
-        """Upload a file to the backend."""
+        """Upload a file to the src."""
         try:
             files = {"file": (filename, file_data)}
+            # This now correctly assumes a /jobs/upload endpoint
             response = self.session.post(f"{self.base_url}/upload", files=files)
             response.raise_for_status()
             return response.json()
@@ -75,6 +80,7 @@ class GeospatialAPIClient:
     def get_available_data(self):
         """Get list of available data files."""
         try:
+            # This now correctly assumes a /jobs/data endpoint
             response = self.session.get(f"{self.base_url}/data")
             response.raise_for_status()
             return response.json()
@@ -82,8 +88,9 @@ class GeospatialAPIClient:
             return {"error": str(e)}
     
     def clear_data(self):
-        """Clear all data from the backend."""
+        """Clear all data from the src."""
         try:
+            # This now correctly assumes a DELETE /jobs/data endpoint
             response = self.session.delete(f"{self.base_url}/data")
             response.raise_for_status()
             return response.json()
@@ -93,6 +100,7 @@ class GeospatialAPIClient:
     def create_sample_data(self):
         """Request backend to create sample data."""
         try:
+            # This now correctly assumes a /jobs/sample-data endpoint
             response = self.session.post(f"{self.base_url}/sample-data")
             response.raise_for_status()
             return response.json()
@@ -362,7 +370,7 @@ class EnhancedGeospatialApp:
             st.error(f"❌ Could not retrieve session info: {str(e)}")
 
     def display_available_data(self):
-        """Display available data files from backend."""
+        """Display available data files from src."""
         if not st.session_state.backend_connected:
             st.info("❌ Backend not connected")
             return
@@ -479,7 +487,7 @@ class EnhancedGeospatialApp:
 
         with st.chat_message("assistant"):
             try:
-                st.session_state.thinking_process = "🤖 Sending query to backend...\n\n"
+                st.session_state.thinking_process = "🤖 Sending query to src...\n\n"
                 
                 with st.spinner("🧠 AI Analyst is processing your request..."):
                     start_time = datetime.now()

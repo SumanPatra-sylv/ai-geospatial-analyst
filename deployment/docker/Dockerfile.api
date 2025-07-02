@@ -1,10 +1,11 @@
-# The worker needs the exact same environment as the API
+# Use a specific, slim base image
 FROM python:3.11-slim
 
 # Set the working directory to the root of our application
 WORKDIR /app
 
 # Install system dependencies needed for geospatial libraries
+# This layer is cached as long as this command doesn't change
 RUN apt-get update && apt-get upgrade -y && apt-get install -y \
     build-essential \
     libgdal-dev \
@@ -14,18 +15,19 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y \
 # Copy only the requirements file first to leverage Docker cache
 COPY requirements.txt .
 
-# Set a global timeout and install dependencies in a single, atomic step
+# Install dependencies. This layer is cached if requirements.txt doesn't change
 RUN pip config set global.timeout 60 && \
     pip install \
         --no-cache-dir \
         --timeout=100 \
         -r requirements.txt
 
-# Copy the entire backend source code into the container
-COPY ./backend /app/backend
+# [FIXED] Copy the entire 'src' directory instead of 'backend'
+# This invalidates the cache when any file in 'src' changes
+COPY ./src /app/src
 
-# Add the application root to the Python path
-# This allows imports like 'from backend.worker.celery_app' to work correctly
+# [VERIFIED] Set the Python path to the application root
+# This allows imports like 'from src.api.main' to work correctly
 ENV PYTHONPATH="/app:${PYTHONPATH}"
 
 # Create a non-root user for security
@@ -33,5 +35,9 @@ RUN groupadd -r appuser && useradd -r -g appuser appuser
 RUN chown -R appuser:appuser /app
 USER appuser
 
-# Command to run the worker (adjust based on your setup)
-CMD ["celery", "-A", "backend.worker.celery_app", "worker", "--loglevel=info"]
+# Expose the port your API runs on
+EXPOSE 8000
+
+# [FIXED] Default command now correctly references the 'src' package
+# Note: This is a default and will be overridden by the command in docker-compose.yml
+CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000"]

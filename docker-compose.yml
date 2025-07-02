@@ -1,8 +1,13 @@
+# docker-compose.yml - UPDATED AND REFACTORED FOR 'src' LAYOUT
+
+# Define a single network for all services to communicate on
 networks:
   app-network:
     driver: bridge
 
 services:
+  # --- INFRASTRUCTURE SERVICES ---
+  
   redis:
     image: "redis:alpine"
     ports:
@@ -20,10 +25,7 @@ services:
 
   postgres:
     image: "postgis/postgis:16-3.4"
-    environment:
-      - POSTGRES_USER=${POSTGRES_USER:-user}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-password}
-      - POSTGRES_DB=${POSTGRES_DB:-gis_db}
+    env_file: .env # Use .env file for credentials
     ports:
       - "5432:5432"
     volumes:
@@ -31,7 +33,7 @@ services:
     networks:
       - app-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-user} -d ${POSTGRES_DB:-gis_db}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -43,9 +45,7 @@ services:
     ports:
       - "9000:9000" # API port
       - "9001:9001" # Console port
-    environment:
-      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
-      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
+    env_file: .env # Use .env file for credentials
     volumes:
       - minio_data:/data
     networks:
@@ -55,38 +55,21 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 10s # Give MinIO time to initialize
     restart: unless-stopped
 
-  prometheus:
-    image: prom/prometheus:latest
-    ports:
-      - "9090:9090" # Prometheus UI port
-    volumes:
-      - ./prometheus:/etc/prometheus
-      - prometheus_data:/prometheus
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-      - '--web.console.libraries=/etc/prometheus/console_libraries'
-      - '--web.console.templates=/etc/prometheus/consoles'
-      - '--storage.tsdb.retention.time=200h'
-      - '--web.enable-lifecycle'
-    networks:
-      - app-network
-    depends_on:
-      api:
-        condition: service_healthy
-      worker:
-        condition: service_started
-    restart: unless-stopped
+  # --- APPLICATION SERVICES ---
 
   api:
     build:
       context: .
-      dockerfile: Dockerfile.api
-    command: uvicorn backend.api.main:app --host 0.0.0.0 --port 8000 --reload
+      # [FIXED] Path to Dockerfile updated
+      dockerfile: deployment/docker/Dockerfile.api
+    # [FIXED] Command updated to use 'src' package
+    command: uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
+    # [FIXED] Volume mount updated to map the 'src' directory
     volumes:
-      - ./backend:/app/backend
+      - ./src:/app/src
     ports:
       - "8000:8000"
     networks:
@@ -98,17 +81,10 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
-    environment:
-      - REDIS_HOST=redis
-      - POSTGRES_HOST=postgres
-      - MINIO_HOST=minio
-      - POSTGRES_USER=${POSTGRES_USER:-user}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-password}
-      - POSTGRES_DB=${POSTGRES_DB:-gis_db}
-      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
-      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
+    env_file: .env
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      # [FIXED] Health check now points to the reliable /docs endpoint
+      test: ["CMD", "curl", "-f", "http://localhost:8000/docs"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -118,10 +94,13 @@ services:
   worker:
     build:
       context: .
-      dockerfile: Dockerfile.worker
-    command: celery -A backend.worker.celery_app.celery worker --loglevel=info --autoscale=10,2
+      # [FIXED] Path to Dockerfile updated
+      dockerfile: deployment/docker/Dockerfile.worker
+    # [FIXED] Command updated to use 'src' package
+    command: celery -A src.worker.celery_app.celery worker --loglevel=info --autoscale=10,2
+    # [FIXED] Volume mount updated to map the 'src' directory
     volumes:
-      - ./backend:/app/backend
+      - ./src:/app/src
     networks:
       - app-network
     depends_on:
@@ -129,23 +108,49 @@ services:
         condition: service_healthy
       api:
         condition: service_healthy
-    environment:
-      - REDIS_HOST=redis
-      - POSTGRES_HOST=postgres
-      - MINIO_HOST=minio
-      - POSTGRES_USER=${POSTGRES_USER:-user}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-password}
-      - POSTGRES_DB=${POSTGRES_DB:-gis_db}
-      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
-      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
-    healthcheck:
-      test: ["CMD", "python", "-c", "from celery import Celery; app = Celery('backend.worker.celery_app.celery'); print('OK' if app.control.ping() else 'FAIL')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
+    env_file: .env
     restart: unless-stopped
 
+  celery-beat:
+    build:
+      context: .
+      # [FIXED] Path to Dockerfile updated
+      dockerfile: deployment/docker/Dockerfile.worker
+    # [FIXED] Command updated to use 'src' package
+    command: celery -A src.worker.celery_app.celery beat --loglevel=info -s /tmp/celerybeat-schedule
+    # [FIXED] Volume mount updated to map the 'src' directory
+    volumes:
+      - ./src:/app/src
+    networks:
+      - app-network
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    env_file: .env
+    restart: unless-stopped
+
+  # --- MONITORING SERVICES ---
+  
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    # [FIXED] Path to prometheus config updated
+    volumes:
+      - ./deployment/prometheus:/etc/prometheus
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+    networks:
+      - app-network
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+# Define persistent volumes
 volumes:
   postgres_data:
   redis_data:

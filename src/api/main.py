@@ -1,4 +1,4 @@
-# backend/api/main.py
+# src/api/main.py
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -36,7 +36,7 @@ async def global_exception_handler(request, exc):
 
 # Import routes after app creation to avoid circular imports
 try:
-    from backend.api.routes import jobs
+    from src.api.routes import jobs
     app.include_router(jobs.router, prefix="/jobs", tags=["Jobs"])
     JOBS_ROUTER_LOADED = True
 except ImportError as e:
@@ -65,7 +65,7 @@ def health_check():
     # If jobs router is loaded, get detailed health info
     if JOBS_ROUTER_LOADED:
         try:
-            from backend.api.routes.jobs import redis_client, REDIS_AVAILABLE, get_celery_task
+            from src.api.routes.jobs import redis_client, REDIS_AVAILABLE, get_celery_task
             
             # Check Redis
             health_status["redis"] = "healthy" if REDIS_AVAILABLE else "unavailable"
@@ -105,7 +105,7 @@ def metrics():
         # Redis status if available
         if JOBS_ROUTER_LOADED:
             try:
-                from backend.api.routes.jobs import redis_client, REDIS_AVAILABLE
+                from src.api.routes.jobs import redis_client, REDIS_AVAILABLE
                 redis_status = 1 if REDIS_AVAILABLE else 0
                 if REDIS_AVAILABLE:
                     try:
@@ -167,7 +167,7 @@ async def shutdown_event():
     # Close Redis connection if available
     if JOBS_ROUTER_LOADED:
         try:
-            from backend.api.routes.jobs import redis_client, REDIS_AVAILABLE
+            from src.api.routes.jobs import redis_client, REDIS_AVAILABLE
             if REDIS_AVAILABLE and redis_client:
                 redis_client.close()
                 print("📪 Redis connection closed")
