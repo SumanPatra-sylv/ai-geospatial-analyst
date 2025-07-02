@@ -1,3 +1,9 @@
+version: '3.8'
+
+networks:
+  app-network:
+    driver: bridge
+
 services:
   redis:
     image: "redis:alpine"
@@ -5,17 +11,33 @@ services:
       - "6379:6379"
     volumes:
       - redis_data:/data
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
 
   postgres:
     image: "postgis/postgis:16-3.4"
     environment:
-      - POSTGRES_USER=user
-      - POSTGRES_PASSWORD=password
-      - POSTGRES_DB=gis_db
+      - POSTGRES_USER=${POSTGRES_USER:-user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-password}
+      - POSTGRES_DB=${POSTGRES_DB:-gis_db}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-user} -d ${POSTGRES_DB:-gis_db}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
 
   minio:
     image: "minio/minio:latest"
@@ -24,10 +46,18 @@ services:
       - "9000:9000" # API port
       - "9001:9001" # Console port
     environment:
-      - MINIO_ROOT_USER=minioadmin
-      - MINIO_ROOT_PASSWORD=minioadmin
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
     volumes:
       - minio_data:/data
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
 
   prometheus:
     image: prom/prometheus:latest
@@ -38,9 +68,19 @@ services:
       - prometheus_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    networks:
+      - app-network
     depends_on:
-      - api
-      - worker
+      api:
+        condition: service_healthy
+      worker:
+        condition: service_started
+    restart: unless-stopped
 
   api:
     build:
@@ -51,32 +91,62 @@ services:
       - ./backend:/app/backend
     ports:
       - "8000:8000"
+    networks:
+      - app-network
     depends_on:
-      - redis
-      - postgres
-      - minio
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
     environment:
       - REDIS_HOST=redis
       - POSTGRES_HOST=postgres
       - MINIO_HOST=minio
+      - POSTGRES_USER=${POSTGRES_USER:-user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-password}
+      - POSTGRES_DB=${POSTGRES_DB:-gis_db}
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
 
   worker:
     build:
       context: .
       dockerfile: Dockerfile.worker
-    # <-- THIS LINE IS UPDATED
     command: celery -A backend.worker.celery_app.celery worker --loglevel=info --autoscale=10,2
     volumes:
       - ./backend:/app/backend
-    ports:
-      - "8001:8001" # Expose port for Prometheus to scrape metrics
+    networks:
+      - app-network
     depends_on:
-      - redis
-      - api # Worker needs the same code as the API
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
     environment:
       - REDIS_HOST=redis
       - POSTGRES_HOST=postgres
       - MINIO_HOST=minio
+      - POSTGRES_USER=${POSTGRES_USER:-user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-password}
+      - POSTGRES_DB=${POSTGRES_DB:-gis_db}
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
+    healthcheck:
+      test: ["CMD", "celery", "-A", "backend.worker.celery_app.celery", "inspect", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
 
 volumes:
   postgres_data:

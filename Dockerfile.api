@@ -1,7 +1,7 @@
 # Use a specific, slim base image
 FROM python:3.11-slim
 
-# Set the working directory
+# Set the working directory to the root of our application
 WORKDIR /app
 
 # Install system dependencies needed for geospatial libraries
@@ -11,14 +11,30 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y \
     # Clean up apt-get cache to keep image size small
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the requirements file
+# Copy only the requirements file first to leverage Docker cache
 COPY requirements.txt .
 
-# Set a global timeout and install dependencies in a single, atomic step
+# Set a global timeout and install dependencies
 RUN pip config set global.timeout 60 && \
     pip install \
         --no-cache-dir \
         --timeout=100 \
         -r requirements.txt
 
-# The command to run the app is in docker-compose.yml
+# Copy the entire backend source code into the container
+COPY ./backend /app/backend
+
+# Add the application root to the Python path
+# This allows imports like 'from backend.api.main' to work correctly
+ENV PYTHONPATH="/app:${PYTHONPATH}"
+
+# Create a non-root user for security
+RUN groupadd -r appuser && useradd -r -g appuser appuser
+RUN chown -R appuser:appuser /app
+USER appuser
+
+# Expose the port your API runs on (adjust as needed)
+EXPOSE 8000
+
+# The command to run the app is now in docker-compose.yml, but this is a good default
+CMD ["uvicorn", "backend.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
