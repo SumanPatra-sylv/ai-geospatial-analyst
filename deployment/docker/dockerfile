@@ -1,0 +1,62 @@
+# deployment/docker/Dockerfile
+# This is the single, efficient, multi-stage Dockerfile for all Python services.
+# Linter suggestions have been applied.
+
+# ===================================================================
+# STAGE 1: "Builder" - Installs dependencies & pre-warms AI cache
+# ===================================================================
+FROM python:3.10-slim AS builder
+
+# Set environment variables to prevent .pyc files and ensure logs are sent straight to console
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+# Set up a virtual environment in a standard location
+ENV VIRTUAL_ENV=/opt/venv
+RUN python3 -m venv $VIRTUAL_ENV
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
+# Install OS dependencies required for building Python packages (like GeoPandas)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libgdal-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy and install Python requirements into the virtual environment
+# We copy from the root of the build context.
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# --- Pre-warm the sentence-transformers cache ---
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+
+# ===================================================================
+# STAGE 2: "Final" - Creates the lean, final production image
+# ===================================================================
+FROM python:3.10-slim AS final
+
+WORKDIR /app
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
+# Install only the RUNTIME OS dependencies (libgdal is needed to run geopandas)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgdal-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the virtual environment with all installed packages from the builder stage
+COPY --from=builder $VIRTUAL_ENV $VIRTUAL_ENV
+
+# Copy the AI model cache from the builder stage
+COPY --from=builder /root/.cache /root/.cache
+
+# Copy the application code into the container
+COPY ./src ./src
+
+# Create a non-root user for better security
+RUN useradd --create-home appuser
+USER appuser

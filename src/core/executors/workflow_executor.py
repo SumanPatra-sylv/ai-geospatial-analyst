@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""
+WorkflowExecutor - Executes spatial analysis workflows from generated plans.
+"""
+
+import sys
+import os
+import warnings
+from typing import Dict, List, Any
+
+# This try/except block allows the module to be run for integrated testing.
+try:
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from src.gis.data_loader import SmartDataLoader
+    from src.core.planners.workflow_generator import WorkflowGenerator
+    from src.core.planners.query_parser import ParsedQuery, SpatialConstraint, SpatialRelationship
+except ImportError:
+    # This path is a fallback for different execution contexts.
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+    from src.gis.data_loader import SmartDataLoader
+    # Dummy classes to prevent crashing if run in a weird context.
+    class WorkflowGenerator: pass
+    class ParsedQuery: pass
+    class SpatialConstraint: pass
+    class SpatialRelationship: pass
+    from enum import Enum
+    SpatialRelationship.WITHIN, SpatialRelationship.NOT_WITHIN = "within", "not within"
+
+import geopandas as gpd
+
+class WorkflowExecutor:
+    """
+    Executes spatial analysis workflows based on structured plans.
+    """
+    
+    def __init__(self):
+        """Initialize the executor with a data loader and a layer cache."""
+        self.smart_data_loader = SmartDataLoader(base_data_dir="data")
+        self.data_layers: Dict[str, gpd.GeoDataFrame] = {}
+    
+    def execute_workflow(self, workflow_plan: List[Dict[str, Any]]) -> gpd.GeoDataFrame:
+        """Execute a complete workflow plan step by step."""
+        if not workflow_plan:
+            raise ValueError("Workflow plan cannot be empty.")
+        
+        self.clear_layers() # Ensure a clean state for every execution
+        print(f"--- Starting workflow execution with {len(workflow_plan)} steps ---")
+        
+        for i, step in enumerate(workflow_plan, 1):
+            operation = step.get('operation')
+            output_layer = step.get('output_layer')
+            
+            if not operation or not output_layer:
+                raise KeyError(f"Step {i} is missing 'operation' or 'output_layer'.")
+            
+            print(f"Step {i}/{len(workflow_plan)}: Executing '{operation}' -> '{output_layer}'")
+            
+            method_name = f"_op_{operation}"
+            if not hasattr(self, method_name):
+                raise ValueError(f"Unknown operation: '{operation}'")
+            
+            operation_method = getattr(self, method_name)
+            result_gdf = operation_method(step)
+            
+            self.data_layers[output_layer] = result_gdf
+            if isinstance(result_gdf, gpd.GeoDataFrame):
+                 print(f"  -> Stored {len(result_gdf)} features in layer '{output_layer}'.")
+        
+        final_layer_name = workflow_plan[-1]['output_layer']
+        final_result = self.data_layers[final_layer_name]
+        print(f"--- Workflow completed. Final result has {len(final_result)} features. ---")
+        
+        return final_result
+    
+    def _op_load_osm_data(self, params: Dict[str, Any]) -> gpd.GeoDataFrame:
+        location = params['location']
+        print(f"    Loading OSM landuse data for: {location}")
+        return self.smart_data_loader.fetch_osm_landuse(location)
+    
+    def _op_filter_by_category(self, params: Dict[str, Any]) -> gpd.GeoDataFrame:
+        input_gdf = self.data_layers[params['input_layer']]
+        category = params['category']
+        print(f"    Filtering '{params['input_layer']}' for category = '{category}'")
+        if 'category' not in input_gdf.columns:
+            warnings.warn(f"Column 'category' not found in layer '{params['input_layer']}'. Returning empty GeoDataFrame.")
+            return gpd.GeoDataFrame(columns=input_gdf.columns, geometry=[], crs=input_gdf.crs)
+        return input_gdf[input_gdf['category'] == category].copy()
+    
+    def _op_buffer(self, params: Dict[str, Any]) -> gpd.GeoDataFrame:
+        gdf = self.data_layers[params['input_layer']]
+        distance = params['distance']
+        print(f"    Buffering {len(gdf)} features by {distance} meters")
+
+        if gdf.empty:
+            return gdf.copy()
+
+        original_crs = gdf.crs
+        projected_gdf = gdf.to_crs("EPSG:3857")
+        
+        projected_gdf.geometry = projected_gdf.geometry.buffer(distance)
+        
+        return projected_gdf.to_crs(original_crs)
+    
+    def _op_intersect(self, params: Dict[str, Any]) -> gpd.GeoDataFrame:
+        gdf1 = self.data_layers[params['input_layers'][0]]
+        gdf2 = self.data_layers[params['input_layers'][1]]
+        print(f"    Intersecting '{params['input_layers'][0]}' ({len(gdf1)}) with '{params['input_layers'][1]}' ({len(gdf2)})")
+
+        if gdf1.empty or gdf2.empty:
+            return gpd.GeoDataFrame(columns=gdf1.columns, geometry=[], crs=gdf1.crs)
+        
+        if gdf1.crs != gdf2.crs:
+            gdf2 = gdf2.to_crs(gdf1.crs)
+        
+        return gpd.overlay(gdf1, gdf2, how='intersection')
+    
+    def _op_difference(self, params: Dict[str, Any]) -> gpd.GeoDataFrame:
+        gdf1 = self.data_layers[params['input_layers'][0]]
+        gdf2 = self.data_layers[params['input_layers'][1]]
+        print(f"    Difference: '{params['input_layers'][0]}' ({len(gdf1)}) minus '{params['input_layers'][1]}' ({len(gdf2)})")
+        
+        if gdf1.empty:
+            return gpd.GeoDataFrame(columns=gdf1.columns, geometry=[], crs=gdf1.crs)
+        if gdf2.empty:
+            return gdf1.copy()
+
+        if gdf1.crs != gdf2.crs:
+            gdf2 = gdf2.to_crs(gdf1.crs)
+
+        return gpd.overlay(gdf1, gdf2, how='difference')
+    
+    def _op_rename_layer(self, params: Dict[str, Any]) -> gpd.GeoDataFrame:
+        print(f"    Finalizing result from layer '{params['input_layer']}'")
+        return self.data_layers[params['input_layer']].copy()
+    
+    def get_layer_info(self) -> None:
+        print("\n=== LAYER INFORMATION ===")
+        if not self.data_layers:
+            print("No layers in memory.")
+            return
+        for name, gdf in self.data_layers.items():
+            print(f"- {name}: {len(gdf)} features, CRS: {gdf.crs}")
+
+    def clear_layers(self):
+        self.data_layers.clear()
+
+if __name__ == '__main__':
+    # --- Integration Test: Generate a plan and then execute it ---
+    print("=== WorkflowExecutor Integration Test ===")
+    
+    # 1. Define a parsed query using the CORRECT data models.
+    query = ParsedQuery(
+        target='park',
+        location='Potsdam, Germany',
+        constraints=[
+            SpatialConstraint(feature_type='residential', relationship=SpatialRelationship.WITHIN, distance_meters=250),
+            SpatialConstraint(feature_type='industrial', relationship=SpatialRelationship.NOT_WITHIN, distance_meters=1000)
+        ]
+    )
+
+    # 2. Generate a realistic workflow plan using our approved generator.
+    print("\n[PHASE 1] Generating workflow plan...")
+    generator = WorkflowGenerator()
+    plan = generator.generate_workflow(query)
+    from pprint import pprint
+    pprint(plan)
+
+    # 3. Execute the generated plan.
+    print("\n[PHASE 2] Executing generated workflow plan...")
+    executor = WorkflowExecutor()
+    try:
+        final_result = executor.execute_workflow(plan)
+        
+        print("\n=== FINAL RESULT ===")
+        print(f"Result contains {len(final_result)} features.")
+        if not final_result.empty:
+            print("Result Info:\n")
+            final_result.info()
+        
+        # 4. Inspect the state after execution.
+        executor.get_layer_info()
+        
+        print("\n--- Integration Test SUCCESSFUL ---")
+        
+    except Exception as e:
+        print(f"\n--- ERROR during execution: {e} ---")
+        import traceback
+        traceback.print_exc()

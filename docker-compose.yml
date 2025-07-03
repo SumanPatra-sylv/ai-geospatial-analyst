@@ -1,158 +1,150 @@
-# docker-compose.yml - UPDATED AND REFACTORED FOR 'src' LAYOUT
-
-# Define a single network for all services to communicate on
-networks:
-  app-network:
-    driver: bridge
+version: '3.8'
 
 services:
-  # --- INFRASTRUCTURE SERVICES ---
-  
+  # Redis service for Celery message broker
   redis:
-    image: "redis:alpine"
+    image: redis:7-alpine
     ports:
       - "6379:6379"
     volumes:
       - redis_data:/data
     networks:
-      - app-network
+      - app-network # Added for explicitness
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 30s
-      timeout: 10s
+      interval: 5s
+      timeout: 3s
       retries: 3
-    restart: unless-stopped
 
-  postgres:
-    image: "postgis/postgis:16-3.4"
-    env_file: .env # Use .env file for credentials
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    networks:
-      - app-network
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    restart: unless-stopped
-
+  # MinIO service for object storage
   minio:
-    image: "minio/minio:latest"
-    command: server /data --console-address ":9001"
+    image: minio/minio:latest
     ports:
-      - "9000:9000" # API port
-      - "9001:9001" # Console port
-    env_file: .env # Use .env file for credentials
+      - "9000:9000"
+      - "9001:9001"
     volumes:
       - minio_data:/data
     networks:
-      - app-network
+      - app-network # Added for explicitness
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
+    command: server /data --console-address ":9001"
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 30s
-      timeout: 10s
+      timeout: 20s
       retries: 3
-      start_period: 10s # Give MinIO time to initialize
-    restart: unless-stopped
 
-  # --- APPLICATION SERVICES ---
-
+  # API service (FastAPI)
   api:
     build:
       context: .
-      # [FIXED] Path to Dockerfile updated
-      dockerfile: deployment/docker/Dockerfile.api
-    # [FIXED] Command updated to use 'src' package
-    command: uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
-    # [FIXED] Volume mount updated to map the 'src' directory
-    volumes:
-      - ./src:/app/src
+      dockerfile: deployment/docker/Dockerfile
     ports:
       - "8000:8000"
     networks:
-      - app-network
+      - app-network # Added for explicitness
     depends_on:
-      redis:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
-    env_file: .env
+      - redis
+      - minio
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - ./src:/app/src
+    command: ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     healthcheck:
-      # [FIXED] Health check now points to the reliable /docs endpoint
-      test: ["CMD", "curl", "-f", "http://localhost:8000/docs"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
-    restart: unless-stopped
 
+  # Celery Worker service
   worker:
     build:
       context: .
-      # [FIXED] Path to Dockerfile updated
-      dockerfile: deployment/docker/Dockerfile.worker
-    # [FIXED] Command updated to use 'src' package
-    command: celery -A src.worker.celery_app.celery worker --loglevel=info --autoscale=10,2
-    # [FIXED] Volume mount updated to map the 'src' directory
+      dockerfile: deployment/docker/Dockerfile
+    command: ["celery", "-A", "src.worker.celery_app", "worker", "--loglevel=info", "--concurrency=2"]
+    networks:
+      - app-network # Added for explicitness
+    depends_on:
+      - redis
+      - minio
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD:-minioadmin}
     volumes:
       - ./src:/app/src
-    networks:
-      - app-network
-    depends_on:
-      redis:
-        condition: service_healthy
-      api:
-        condition: service_healthy
-    env_file: .env
-    restart: unless-stopped
 
+  # Celery Beat service (scheduler)
   celery-beat:
     build:
       context: .
-      # [FIXED] Path to Dockerfile updated
-      dockerfile: deployment/docker/Dockerfile.worker
-    # [FIXED] Command updated to use 'src' package
-    command: celery -A src.worker.celery_app.celery beat --loglevel=info -s /tmp/celerybeat-schedule
-    # [FIXED] Volume mount updated to map the 'src' directory
+      dockerfile: deployment/docker/Dockerfile
+    networks:
+      - app-network # Added for explicitness
+    depends_on:
+      - redis
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
     volumes:
       - ./src:/app/src
-    networks:
-      - app-network
-    depends_on:
-      redis:
-        condition: service_healthy
-      api:
-        condition: service_healthy
-    env_file: .env
-    restart: unless-stopped
+      - celery_beat_data:/app/celery
+    command: [
+      "celery", "-A", "src.worker.celery_app", "beat", 
+      "--loglevel=info",
+      "--schedule=/app/celery/celerybeat-schedule" # Simplified command
+    ]
+    healthcheck:
+      test: ["CMD", "test", "-f", "/app/celery/celerybeat-schedule"] # Simplified healthcheck
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
-  # --- MONITORING SERVICES ---
-  
+  # Streamlit frontend service
+  frontend:
+    build:
+      context: .
+      dockerfile: deployment/docker/Dockerfile
+    ports:
+      - "8501:8501"
+    networks:
+      - app-network # Added for explicitness
+    depends_on:
+      - api
+    environment:
+      - API_BASE_URL=http://api:8000
+    volumes:
+      - ./src:/app/src
+    command: ["streamlit", "run", "src/frontend/app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+
+  # Prometheus monitoring service
   prometheus:
     image: prom/prometheus:latest
     ports:
       - "9090:9090"
-    # [FIXED] Path to prometheus config updated
+    networks:
+      - app-network # Added for explicitness
     volumes:
       - ./deployment/prometheus:/etc/prometheus
       - prometheus_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
-    networks:
-      - app-network
-    depends_on:
-      api:
-        condition: service_healthy
-    restart: unless-stopped
 
-# Define persistent volumes
 volumes:
-  postgres_data:
   redis_data:
   minio_data:
+  celery_beat_data:
   prometheus_data:
+
+networks:
+  app-network:
+    driver: bridge
