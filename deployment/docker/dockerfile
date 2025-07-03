@@ -1,5 +1,5 @@
 # deployment/docker/Dockerfile
-# FINAL, FULLY OPTIMIZED VERSION - Includes all fixes.
+# FINAL CORRECTED VERSION - Re-ordered the cleanup and cache-warming steps.
 
 # ===================================================================
 # STAGE 1: "Builder" - Installs dependencies & pre-warms AI cache
@@ -25,14 +25,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt
 
-# --- AGGRESSIVE CLEANUP to reduce image size ---
-# This removes non-essential files from the installed packages.
+# --- FIX: Pre-warm the cache BEFORE cleaning up ---
+# This ensures all modules are available for the model download process.
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+
+# --- Aggressive cleanup now runs AFTER the model is cached ---
+# This removes non-essential files from the installed packages to reduce size.
 RUN find $VIRTUAL_ENV -depth \
     \( -type d -a -name 'tests' -o -name 'test' -o -name '__pycache__' \) -exec rm -rf '{}' + \
     -o \( -type f -a -name '*.pyc' -o -name '*.pyo' \) -delete
-
-# --- Pre-warm the sentence-transformers cache ---
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
 
 # ===================================================================
 # STAGE 2: "Final" - Creates the lean, final production image
@@ -46,8 +47,6 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
-# --- FIX: Explicitly set PYTHONPATH ---
-# This ensures Python can find modules inside the 'src' directory.
 ENV PYTHONPATH=/app
 
 # Install only the RUNTIME OS dependencies (libgdal is needed to run geopandas)
