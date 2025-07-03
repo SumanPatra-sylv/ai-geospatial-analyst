@@ -1,6 +1,5 @@
 # deployment/docker/Dockerfile
-# This is the single, efficient, multi-stage Dockerfile for all Python services.
-# Linter suggestions have been applied.
+# FINAL OPTIMIZED VERSION - Includes all fixes and size optimizations.
 
 # ===================================================================
 # STAGE 1: "Builder" - Installs dependencies & pre-warms AI cache
@@ -23,9 +22,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy and install Python requirements into the virtual environment
-# We copy from the root of the build context.
 COPY requirements.txt .
 RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt
+
+# --- NEW OPTIMIZATION: Clean up the venv to reduce image size ---
+RUN find $VIRTUAL_ENV \( -type d -a -name __pycache__ \) -o \( -type f -a -name '*.pyc' \) -o \( -type f -a -name '*.pyo' \) -delete
 
 # --- Pre-warm the sentence-transformers cache ---
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
@@ -59,4 +60,9 @@ COPY ./src ./src
 
 # Create a non-root user for better security
 RUN useradd --create-home appuser
+
+# FIX: Create the directory for celery beat and give our user ownership
+RUN mkdir -p /app/celery && chown -R appuser:appuser /app/celery
+
+# Switch to the non-root user
 USER appuser
