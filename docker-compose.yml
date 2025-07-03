@@ -9,7 +9,7 @@ services:
     volumes:
       - redis_data:/data
     networks:
-      - app-network # Added for explicitness
+      - app-network
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -25,7 +25,7 @@ services:
     volumes:
       - minio_data:/data
     networks:
-      - app-network # Added for explicitness
+      - app-network
     environment:
       - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
       - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
@@ -44,7 +44,7 @@ services:
     ports:
       - "8000:8000"
     networks:
-      - app-network # Added for explicitness
+      - app-network
     depends_on:
       - redis
       - minio
@@ -70,7 +70,7 @@ services:
       dockerfile: deployment/docker/Dockerfile
     command: ["celery", "-A", "src.worker.celery_app", "worker", "--loglevel=info", "--concurrency=2"]
     networks:
-      - app-network # Added for explicitness
+      - app-network
     depends_on:
       - redis
       - minio
@@ -89,7 +89,7 @@ services:
       context: .
       dockerfile: deployment/docker/Dockerfile
     networks:
-      - app-network # Added for explicitness
+      - app-network
     depends_on:
       - redis
     environment:
@@ -101,10 +101,10 @@ services:
     command: [
       "celery", "-A", "src.worker.celery_app", "beat", 
       "--loglevel=info",
-      "--schedule=/app/celery/celerybeat-schedule" # Simplified command
+      "--schedule=/app/celery/celerybeat-schedule"
     ]
     healthcheck:
-      test: ["CMD", "test", "-f", "/app/celery/celerybeat-schedule"] # Simplified healthcheck
+      test: ["CMD", "test", "-f", "/app/celery/celerybeat-schedule"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -117,14 +117,16 @@ services:
     ports:
       - "8501:8501"
     networks:
-      - app-network # Added for explicitness
+      - app-network
     depends_on:
       - api
     environment:
       - API_BASE_URL=http://api:8000
     volumes:
       - ./src:/app/src
-    command: ["streamlit", "run", "src/frontend/app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    # --- THIS IS THE FIX ---
+    # The path now correctly points to your Streamlit app in the 'ui' directory.
+    command: ["streamlit", "run", "src/ui/app.py", "--server.port=8501", "--server.address=0.0.0.0"]
 
   # Prometheus monitoring service
   prometheus:
@@ -132,7 +134,7 @@ services:
     ports:
       - "9090:9090"
     networks:
-      - app-network # Added for explicitness
+      - app-network
     volumes:
       - ./deployment/prometheus:/etc/prometheus
       - prometheus_data:/prometheus
