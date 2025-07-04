@@ -17,6 +17,10 @@ from typing import List, Optional
 import geopandas as gpd
 import numpy as np
 import osmnx as ox
+cache_dir = Path("/app/data/cache")
+cache_dir.mkdir(parents=True, exist_ok=True) # Ensure the directory exists
+ox.settings.cache_folder = str(cache_dir)
+ox.settings.use_cache = True
 
 # Suppress noisy UserWarnings from osmnx about feature queries.
 # This can be commented out during debugging if library warnings are needed.
@@ -79,7 +83,8 @@ class SmartDataLoader:
         # Define OSM tags for land use data
         landuse_tags = {
             'landuse': ['residential', 'industrial', 'commercial'],
-            'leisure': ['park', 'recreation_ground']
+            'leisure': ['park', 'recreation_ground'],
+            'amenity': ['hospital','clinic','pharmacy']
         }
         
         try:

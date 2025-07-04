@@ -1,0 +1,11 @@
+# Start from a minimal Linux that has a shell and curl
+FROM alpine:latest
+
+# Install curl (for the healthcheck loop) and the MinIO Client (mc)
+RUN apk add --no-cache curl minio-client
+
+# Copy the main MinIO server binary from the official image
+COPY --from=minio/minio:latest /usr/bin/minio /usr/bin/minio
+
+# Expose the standard MinIO ports
+EXPOSE 9000 9001

@@ -1,4 +1,4 @@
-# app.py (Refactored Frontend - Pure API Client) - FIXED VERSION
+# app.py (Refactored Frontend - Pure API Client) - FINAL CORRECTED VERSION
 
 import streamlit as st
 import requests
@@ -8,15 +8,17 @@ from pathlib import Path
 import pandas as pd
 import streamlit.components.v1 as components
 import json
+import time # <<< FIX: Added for polling delay
 
 # ==============================================================================
 # 1. CONFIGURATION AND CONSTANTS
 # ==============================================================================
 
-# FastAPI backend configuration
-BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
-# FIXED: The base path for job-related endpoints is /jobs, not /api/v1
-API_BASE = f"{BACKEND_URL}/jobs"
+# --- FIX: Read the correct environment variable 'API_BASE_URL' ---
+BACKEND_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
+
+# The base path for job-related endpoints is /jobs
+API_BASE = f"{BACKEND_URL}/api/v1/jobs"
 
 # ==============================================================================
 # 2. API CLIENT CLASS
@@ -24,48 +26,60 @@ API_BASE = f"{BACKEND_URL}/jobs"
 
 class GeospatialAPIClient:
     """API client for communicating with the FastAPI src."""
-    
+
     def __init__(self, base_url=API_BASE):
         self.base_url = base_url
         self.session = requests.Session()
-    
+
     def health_check(self):
         """Check if the backend is healthy."""
         try:
-            # This is correct - it calls the root /health endpoint
+            # This correctly calls the root /health endpoint
             response = self.session.get(f"{BACKEND_URL}/health", timeout=5)
             return response.status_code == 200
         except Exception:
             return False
-    
+
     def get_status(self):
         """Get current backend jobs router status."""
         try:
-            # FIXED: Call the available /jobs/health endpoint instead of /api/v1/status
+            # Call the available /jobs/health endpoint
             response = self.session.get(f"{self.base_url}/health")
             response.raise_for_status()
             return response.json()
         except Exception as e:
             return {"error": str(e)}
-    
+
+    # SURGICAL FIX 1: Add get_job_status to the API Client
+    def get_job_status(self, job_id: str):
+        """Get the status of a specific job by polling the backend."""
+        try:
+            response = self.session.get(f"{self.base_url}/status/{job_id}")
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            # If polling fails, return a FAILURE status to stop the loop.
+            return {"status": "FAILURE", "error": f"Polling failed: {str(e)}"}
+
     def process_query(self, query, session_id=None):
-        """Send a query to the backend for processing."""
+        """Send a query to the backend to START processing."""
         try:
             payload = {"query": query}
             if session_id:
                 payload["session_id"] = session_id
             
-            # FIXED: The correct endpoint is /jobs/start, not /api/v1/query
+            # The correct endpoint is /jobs/start
             response = self.session.post(
-                f"{self.base_url}/start", 
+                f"{self.base_url}/start",
                 json=payload,
-                timeout=300  # 5 minute timeout for complex queries
+                timeout=30  # Initial request can have a short timeout
             )
             response.raise_for_status()
             return response.json()
         except Exception as e:
-            return {"error": str(e), "success": False}
-    
+            # This error is now more specific to the job *submission* failing
+            return {"error": str(e)}
+
     def upload_file(self, file_data, filename):
         """Upload a file to the src."""
         try:
@@ -76,7 +90,7 @@ class GeospatialAPIClient:
             return response.json()
         except Exception as e:
             return {"error": str(e), "success": False}
-    
+
     def get_available_data(self):
         """Get list of available data files."""
         try:
@@ -86,7 +100,7 @@ class GeospatialAPIClient:
             return response.json()
         except Exception as e:
             return {"error": str(e)}
-    
+
     def clear_data(self):
         """Clear all data from the src."""
         try:
@@ -96,7 +110,7 @@ class GeospatialAPIClient:
             return response.json()
         except Exception as e:
             return {"error": str(e)}
-    
+
     def create_sample_data(self):
         """Request backend to create sample data."""
         try:
@@ -122,9 +136,9 @@ class EnhancedGeospatialApp:
     def setup_page_config(self):
         """Configure Streamlit page settings and custom CSS."""
         st.set_page_config(
-            page_title="🤖 Professional AI Geospatial Analyst", 
-            layout="wide", 
-            page_icon="🗺️", 
+            page_title="🤖 Professional AI Geospatial Analyst",
+            layout="wide",
+            page_icon="🗺️",
             initial_sidebar_state="expanded"
         )
         
@@ -239,7 +253,7 @@ class EnhancedGeospatialApp:
                 if st.button("📊 Sample Data", use_container_width=True, help="Create sample geospatial data"):
                     if st.session_state.backend_connected:
                         result = self.api_client.create_sample_data()
-                        if result.get("success"):
+                        if "error" not in result:
                             st.success("✅ Sample data created successfully")
                         else:
                             st.error(f"❌ Error: {result.get('error', 'Unknown error')}")
@@ -250,7 +264,7 @@ class EnhancedGeospatialApp:
                 if st.button("🧹 Clear Data", use_container_width=True, help="Clear all loaded data"):
                     if st.session_state.backend_connected:
                         result = self.api_client.clear_data()
-                        if result.get("success"):
+                        if "error" not in result:
                             st.success("✅ Data cleared successfully")
                         else:
                             st.error(f"❌ Error: {result.get('error', 'Unknown error')}")
@@ -260,7 +274,7 @@ class EnhancedGeospatialApp:
             
             # File upload
             uploaded_file = st.file_uploader(
-                "Upload Geospatial Data", 
+                "Upload Geospatial Data",
                 type=['shp', 'geojson', 'gpkg', 'tif', 'tiff', 'csv'],
                 help="Upload vector or raster data files"
             )
@@ -325,8 +339,8 @@ class EnhancedGeospatialApp:
                         st.session_state[key] = [] if isinstance(st.session_state[key], list) else None
             
             st.session_state.processing_stats = {
-                "total_queries": 0, 
-                "successful_queries": 0, 
+                "total_queries": 0,
+                "successful_queries": 0,
                 "failed_queries": 0
             }
             
@@ -385,15 +399,16 @@ class EnhancedGeospatialApp:
             files = data_info.get("files", [])
             layers = data_info.get("loaded_layers", [])
             
-            if not files:
+            if not files and not layers:
                 st.info("📁 No data files found")
                 st.info("💡 Use 'Sample Data' button or upload files to get started")
                 return
             
-            st.write("**📄 Available Files:**")
-            for file_info in files:
-                file_size = file_info.get("size_kb", 0)
-                st.code(f"{file_info['name']} ({file_size:.1f} KB)")
+            if files:
+                st.write("**📄 Available Files:**")
+                for file_info in files:
+                    file_size = file_info.get("size_kb", 0)
+                    st.code(f"{file_info['name']} ({file_size:.1f} KB)")
                     
             if layers:
                 st.write("**🔄 Currently Loaded:**")
@@ -461,104 +476,101 @@ class EnhancedGeospatialApp:
         with col2:
             st.subheader("🧠 Analysis Status")
             st.markdown(
-                f'<div class="thinking-box">{st.session_state.thinking_process}</div>', 
+                f'<div class="thinking-box">{st.session_state.thinking_process}</div>',
                 unsafe_allow_html=True
             )
             
             with st.expander("📈 Processing Details", expanded=False):
                 if st.session_state.workflow_history:
                     st.write("**Recent Workflow Steps:**")
-                    for i, step in enumerate(st.session_state.workflow_history[-3:]):
-                        st.write(f"{i+1}. {step.get('timestamp', 'Unknown')[:19]}")
-                        st.write(f"   Query: {step.get('query', 'N/A')[:50]}...")
+                    for i, step in enumerate(reversed(st.session_state.workflow_history[-3:])):
+                        st.write(f"**Step {len(st.session_state.workflow_history)-i}:** {step.get('timestamp', 'Unknown')[:19]}")
+                        st.write(f"   Query: `{step.get('query', 'N/A')[:50]}...`")
                 else:
                     st.info("No workflow history yet")
 
+    # SURGICAL FIX 2: Replace process_user_query with a Robust Polling Version
     def process_user_query(self, prompt):
-        """Process user query via API."""
+        """Process user query via API with robust status polling."""
         if not st.session_state.backend_connected:
             st.error("❌ Backend not connected")
             return
-            
+
         st.session_state.processing_stats['total_queries'] += 1
         st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"): 
+        with st.chat_message("user"):
             st.markdown(prompt)
 
         with st.chat_message("assistant"):
+            start_time = datetime.now()
             try:
-                st.session_state.thinking_process = "🤖 Sending query to src...\n\n"
-                
-                with st.spinner("🧠 AI Analyst is processing your request..."):
-                    start_time = datetime.now()
-                    
-                    # Send query to backend
-                    result = self.api_client.process_query(
-                        prompt, 
-                        session_id=st.session_state.session_id
-                    )
-                    
-                    end_time = datetime.now()
-                    processing_time = (end_time - start_time).total_seconds()
+                # Part 1: Submit the job
+                st.session_state.thinking_process = "🤖 Sending query to backend..."
+                initial_result = self.api_client.process_query(prompt, session_id=st.session_state.session_id)
 
-                if result.get("success"):
-                    response_text = result.get("response", "No response received")
-                    thinking_log = result.get("thinking_process", "")
-                    
+                if not initial_result.get("job_id"):
+                    error_msg = f"❌ Backend Error: {initial_result.get('error', 'Failed to start job.')}"
+                    st.error(error_msg)
+                    st.session_state.processing_stats['failed_queries'] += 1
+                    return
+
+                job_id = initial_result["job_id"]
+                st.info(f"✅ Job `{job_id}` started. Polling for results...")
+
+                # Part 2: Poll for the result
+                final_status = None
+                with st.spinner("🧠 AI Analyst is processing..."):
+                    while True:
+                        status_response = self.api_client.get_job_status(job_id)
+                        current_status = status_response.get("status")
+
+                        if current_status in ["SUCCESS", "FAILURE"]:
+                            final_status = status_response
+                            break  # Exit the loop
+
+                        # Optional: Update UI with progress from backend
+                        if current_status == "PROGRESS" and status_response.get("progress"):
+                            progress_meta = status_response["progress"]
+                            stage = progress_meta.get('stage', 'working')
+                            st.session_state.thinking_process = f"🧠 Status: {stage}..."
+                        
+                        time.sleep(2)  # Wait 2 seconds before checking again
+
+                # Part 3: Process the final result
+                end_time = datetime.now()
+                processing_time = (end_time - start_time).total_seconds()
+
+                if final_status and final_status.get("status") == "SUCCESS":
+                    result_data = final_status.get("result", {})
+                    # This is the line that was likely causing the error before.
+                    # We now use .get() to safely access the response.
+                    response_text = result_data.get("response", "Analysis complete! Results processed successfully.")
+
                     st.markdown(response_text)
                     st.session_state.messages.append({"role": "assistant", "content": response_text})
                     st.session_state.processing_stats['successful_queries'] += 1
-                    
-                    # Update thinking process with backend log
-                    if thinking_log:
-                        st.session_state.thinking_process = thinking_log
-                    
-                    # Check for map files
-                    if result.get("map_file"):
-                        map_url = f"{BACKEND_URL}/maps/{result['map_file']}"
+                    st.success(f"✅ Analysis completed in {processing_time:.2f} seconds.")
+
+                    # Safely check for a map file and display it
+                    if result_data and result_data.get("map_file"):
+                        map_url = f"{BACKEND_URL}/maps/{result_data['map_file']}"
                         try:
                             map_response = requests.get(map_url)
-                            if map_response.status_code == 200:
-                                with st.expander(f"🗺️ View Interactive Map: {result['map_file']}", expanded=True):
-                                    components.html(map_response.text, height=500, scrolling=True)
-                            else:
-                                st.warning(f"🗺️ Map generated but could not be loaded: {result['map_file']}")
+                            map_response.raise_for_status()
+                            with st.expander("🗺️ View Interactive Map", expanded=True):
+                                components.html(map_response.text, height=500, scrolling=True)
                         except Exception as map_error:
-                            st.warning(f"🗺️ Map generated but could not be displayed: {str(map_error)}")
-                    
-                    workflow_entry = {
-                        "timestamp": datetime.now().isoformat(), 
-                        "query": prompt, 
-                        "response": response_text,
-                        "processing_time": processing_time,
-                        "success": True
-                    }
-                    st.session_state.workflow_history.append(workflow_entry)
-                    
-                    st.success(f"✅ Analysis completed in {processing_time:.2f} seconds")
-                else:
-                    error_msg = f"❌ **Backend Error:** {result.get('error', 'Unknown error')}"
+                            st.warning(f"🗺️ Map generated but could not be displayed: {map_error}")
+
+                else: # Handle job failure
+                    error_msg = f"❌ Backend Job Failed: {final_status.get('error', 'Unknown execution error.')}"
                     st.error(error_msg)
-                    st.session_state.messages.append({"role": "assistant", "content": error_msg})
                     st.session_state.processing_stats['failed_queries'] += 1
-                    
-                    error_entry = {
-                        "timestamp": datetime.now().isoformat(), 
-                        "query": prompt, 
-                        "error": result.get('error', 'Unknown error'),
-                        "success": False
-                    }
-                    st.session_state.workflow_history.append(error_entry)
-                
+
             except Exception as e:
-                error_msg = f"❌ **Communication Error:** {str(e)}"
-                st.error(error_msg)
-                st.session_state.messages.append({"role": "assistant", "content": error_msg})
+                # This catches errors in the frontend logic itself
+                st.error(f"❌ Frontend Communication Error: {str(e)}")
                 st.session_state.processing_stats['failed_queries'] += 1
-                
-                with st.expander("🔍 Error Details", expanded=False):
-                    st.code(str(e))
-                    st.info("💡 Check backend connection and try again")
 
     def render_advanced_features(self):
         """Render advanced features panel."""
@@ -653,9 +665,14 @@ class EnhancedGeospatialApp:
             st.caption("Frontend Client for FastAPI Backend")
         
         with col2:
-            if st.button("📥 Export Session", help="Download session data and chat history"):
-                self.export_session_data()
-        
+            st.download_button(
+                label="📥 Export Session",
+                data="{}", # Dummy data, real logic in on_click
+                on_click=self.export_session_data,
+                file_name="session_export.json", # Dummy name
+                help="Download session data and chat history"
+            )
+
         with col3:
             if st.button("🔄 Refresh App", help="Refresh the entire application"):
                 st.rerun()

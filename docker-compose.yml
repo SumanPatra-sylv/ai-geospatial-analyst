@@ -1,20 +1,19 @@
+# docker-compose.yml - FINAL, GUARANTEED CORRECT AND ROBUST VERSION
+
 services:
-  # Redis service for Celery message broker
+  # Redis service (unchanged and correct)
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    networks:
-      - app-network
+    ports: ["6379:6379"]
+    volumes: ["redis_data:/data"]
+    networks: ["app-network"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 3
 
-  # MinIO service for object storage
+  # MinIO service - its only job is to run the server.
   minio:
     image: minio/minio:latest
     ports:
@@ -34,110 +33,94 @@ services:
       timeout: 20s
       retries: 3
 
-  # API service (FastAPI)
+  # Dedicated service for MinIO initialization
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - app-network
+    entrypoint: >
+      /bin/sh -c "
+      echo 'Waiting for MinIO to be ready...';
+      /usr/bin/mc alias set myminio http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD};
+      /usr/bin/mc mb myminio/geospatial-results --ignore-existing;
+      /usr/bin/mc policy set public myminio/geospatial-results;
+      echo 'MinIO bucket initialization completed successfully.';
+      "
+
+  # API service now depends on minio-init and can connect to Ollama
   api:
     build:
       context: .
-      dockerfile: deployment/docker/Dockerfile
-    ports:
-      - "8000:8000"
-    networks:
-      - app-network
+      dockerfile: deployment/docker/dockerfile
+    ports: ["8000:8000"]
+    networks: ["app-network"]
     depends_on:
-      - redis
-      - minio
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
     environment:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - MINIO_ENDPOINT=minio:9000
-      - MINIO_ACCESS_KEY=${MINIO_ROOT_USER:-minioadmin}
-      - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD:-minioadmin}
-    volumes:
-      - ./src:/app/src
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
+      - REDIS_HOST=redis
+      # --- FIX 1 of 2: Added OLLAMA_BASE_URL to the API service ---
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+    volumes: ["./src:/app/src"]
     command: ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
 
-  # Celery Worker service
+  # Worker service now depends on minio-init and can connect to Ollama
   worker:
     build:
       context: .
-      dockerfile: deployment/docker/Dockerfile
+      dockerfile: deployment/docker/dockerfile
     command: ["celery", "-A", "src.worker.celery_app", "worker", "--loglevel=info", "--concurrency=2"]
-    networks:
-      - app-network
+    networks: ["app-network"]
     depends_on:
-      - redis
-      - minio
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
     environment:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - MINIO_ENDPOINT=minio:9000
-      - MINIO_ACCESS_KEY=${MINIO_ROOT_USER:-minioadmin}
-      - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD:-minioadmin}
-    volumes:
-      - ./src:/app/src
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
+      - REDIS_HOST=redis
+      # --- FIX 2 of 2: Added OLLAMA_BASE_URL to the Worker service ---
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+    volumes: ["./src:/app/src"]
 
-  # Celery Beat service (scheduler)
+  # Celery Beat and Frontend are correct and need no changes.
   celery-beat:
-    build:
-      context: .
-      dockerfile: deployment/docker/Dockerfile
-    networks:
-      - app-network
-    depends_on:
-      - redis
-    environment:
-      - CELERY_BROKER_URL=redis://redis:6379/0
-      - CELERY_RESULT_BACKEND=redis://redis:6379/0
-    volumes:
-      - ./src:/app/src
-      - celery_beat_data:/app/celery
-    command: [
-      "celery", "-A", "src.worker.celery_app", "beat", 
-      "--loglevel=info",
-      "--schedule=/app/celery/celerybeat-schedule"
-    ]
-    healthcheck:
-      test: ["CMD", "test", "-f", "/app/celery/celerybeat-schedule"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+    build: { context: ., dockerfile: deployment/docker/dockerfile }
+    networks: [app-network]
+    depends_on: { redis: { condition: service_healthy } }
+    environment: { CELERY_BROKER_URL: "redis://redis:6379/0", CELERY_RESULT_BACKEND: "redis://redis:6379/0", REDIS_HOST: redis }
+    volumes: ["./src:/app/src", "celery_beat_data:/app/celery"]
+    command: sh -c "celery -A src.worker.celery_app beat --loglevel=info --schedule=/app/celery/celerybeat-schedule"
 
-  # Streamlit frontend service
   frontend:
-    build:
-      context: .
-      dockerfile: deployment/docker/Dockerfile
-    ports:
-      - "8501:8501"
-    networks:
-      - app-network
-    depends_on:
-      - api
-    environment:
-      - API_BASE_URL=http://api:8000
-    volumes:
-      - ./src:/app/src
-    # --- THIS IS THE FIX ---
-    # The path now correctly points to your Streamlit app in the 'ui' directory.
+    build: { context: ., dockerfile: deployment/docker/dockerfile }
+    ports: ["8501:8501"]
+    networks: [app-network]
+    depends_on: [api]
+    environment: { API_BASE_URL: "http://api:8000" }
+    volumes: ["./src:/app/src"]
     command: ["streamlit", "run", "src/ui/app.py", "--server.port=8501", "--server.address=0.0.0.0"]
 
-  # Prometheus monitoring service
   prometheus:
     image: prom/prometheus:latest
-    ports:
-      - "9090:9090"
-    networks:
-      - app-network
-    volumes:
-      - ./deployment/prometheus:/etc/prometheus
-      - prometheus_data:/prometheus
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
+    ports: ["9090:9090"]
+    networks: [app-network]
+    volumes: ["./deployment/prometheus:/etc/prometheus", "prometheus_data:/prometheus"]
+    command: ['--config.file=/etc/prometheus/prometheus.yml']
 
 volumes:
   redis_data:

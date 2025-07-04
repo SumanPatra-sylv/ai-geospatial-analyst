@@ -1,5 +1,5 @@
 # deployment/docker/Dockerfile
-# FINAL CORRECTED VERSION - Re-ordered the cleanup and cache-warming steps.
+# FINAL, COMPLETE, AND CORRECTED VERSION
 
 # ===================================================================
 # STAGE 1: "Builder" - Installs dependencies & pre-warms AI cache
@@ -25,12 +25,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt
 
-# --- FIX: Pre-warm the cache BEFORE cleaning up ---
-# This ensures all modules are available for the model download process.
+# Pre-warm the cache BEFORE cleaning up
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
 
-# --- Aggressive cleanup now runs AFTER the model is cached ---
-# This removes non-essential files from the installed packages to reduce size.
+# Aggressive cleanup now runs AFTER the model is cached
 RUN find $VIRTUAL_ENV -depth \
     \( -type d -a -name 'tests' -o -name 'test' -o -name '__pycache__' \) -exec rm -rf '{}' + \
     -o \( -type f -a -name '*.pyc' -o -name '*.pyo' \) -delete
@@ -47,7 +45,6 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
-ENV PYTHONPATH=/app
 
 # Install only the RUNTIME OS dependencies (libgdal is needed to run geopandas)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -66,8 +63,11 @@ COPY ./src ./src
 # Create a non-root user for better security
 RUN useradd --create-home appuser
 
-# FIX: Create the directory for celery beat and give our user ownership
-RUN mkdir -p /app/celery && chown -R appuser:appuser /app/celery
+# --- FIX: Create all necessary directories and give appuser ownership ---
+# Added `/app/data/cache` to this command. This pre-creates the directory
+# that the osmnx library needs to write to, and gives our non-root user
+# ownership, resolving the final PermissionError.
+RUN mkdir -p /app/data/cache /app/celery && chown -R appuser:appuser /app/data /app/celery
 
 # Switch to the non-root user
 USER appuser

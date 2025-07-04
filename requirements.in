@@ -16,6 +16,7 @@ torch
 
 # --- Geospatial & Data ---
 geopandas
+osmnx
 rasterio
 rasterstats
 #psycopg2-binary
