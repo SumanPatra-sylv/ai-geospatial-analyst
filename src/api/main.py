@@ -36,7 +36,7 @@ async def global_exception_handler(request, exc):
 
 # Import routes after app creation to avoid circular imports
 try:
-    from src.api.routes import jobs
+    from api.routes import jobs
     app.include_router(jobs.router, prefix="/api/v1/jobs", tags=["Jobs"])
     JOBS_ROUTER_LOADED = True
 except ImportError as e:

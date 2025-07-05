@@ -11,6 +11,7 @@ import logging
 from enum import Enum
 from typing import List, Optional
 import os
+import jinja2
 import requests
 
 from pydantic import BaseModel, Field, ValidationError
@@ -99,49 +100,49 @@ The JSON output MUST conform to the following Pydantic model structure:
 [EXAMPLE 1]
 User Query: "Show me parks near residential areas in Berlin"
 JSON Output:
-{{
+{
   "target": "park",
   "location": "Berlin, Germany",
   "constraints": [
-    {{
+    {
       "feature_type": "residential",
       "relationship": "near",
       "distance_meters": null
-    }}
+    }
   ],
   "summary_required": true
-}}
+}
 
 [EXAMPLE 2]
 User Query: "Find schools in London that are not within 500m of a highway"
 JSON Output:
-{{
+{
   "target": "school",
   "location": "London, UK",
   "constraints": [
-    {{
+    {
       "feature_type": "highway",
       "relationship": "not within",
       "distance_meters": 500
-    }}
+    }
   ],
   "summary_required": false
-}}
+}
 
 [EXAMPLE 3]
 User Query: "Summarize landuse in Potsdam"
 JSON Output:
-{{
+{
   "target": "landuse",
   "location": "Potsdam, Germany",
   "constraints": null,
   "summary_required": true
-}}
+}
 --- END EXAMPLES ---
 
 Now, analyze the following user query and provide ONLY the JSON output.
 
-User Query: "{user_query}"
+User Query: "{{user_query}}"
 """
 
     # --- ACTION 2: Simplified 'parse' method ---
@@ -150,7 +151,8 @@ User Query: "{user_query}"
         Parses a natural language query into a structured ParsedQuery object
         using a high-reliability few-shot prompt.
         """
-        prompt = self.SYSTEM_PROMPT.format(user_query=user_query)
+        template = jinja2.Environment().from_string(self.SYSTEM_PROMPT)
+        prompt = template.render(user_query=user_query)
         logger.info(f"Parsing query: '{user_query}'")
         
         try:

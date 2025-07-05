@@ -18,7 +18,10 @@ from src.worker.celery_app import celery
 from src.core.executors.workflow_executor import WorkflowExecutor, LocationNotFoundError
 from src.core.planners.workflow_generator import WorkflowGenerator
 from src.core.planners.query_parser import QueryParser, QueryParserError
-from src.core.knowledge_base import KnowledgeBase # Step 1: Add Necessary Imports
+from src.core.knowledge_base import KnowledgeBase # For the Conductor Agent
+# Import the new Knowledge Base for the Geospatial Tool
+from src.core.rag.geospatial_knowledge import GeospatialKnowledgeBase
+
 
 # Redis client for storing job status updates
 try:
@@ -103,69 +106,95 @@ def find_special_command(user_query: str) -> Optional[Dict[str, Any]]:
 
 def geospatial_planning_and_execution_tool(user_query: str, job_id: str) -> Dict[str, Any]:
     """
-    Encapsulates the entire geospatial pipeline and returns rich artifacts and reasoning.
+    Encapsulates the entire geospatial pipeline with RAG and a learning loop.
     """
     logger.info(f"Executing geospatial analysis for query: '{user_query}'")
     cot_log = []  # Initialize the Chain-of-Thought log
+    start_time = time.time() # Start timer for performance tracking
 
     try:
+        # --- RAG AND LEARNING LOOP IMPLEMENTATION ---
+        logger.info(f"Initializing Geospatial Knowledge Base...")
+        kb = GeospatialKnowledgeBase()
+        
         cot_log.append("1. Parsing user query into a structured format.")
         parser = QueryParser()
         parsed_query = parser.parse(user_query)
         
-        cot_log.append(f"2. Asking AI Planner to generate a reasoned workflow for target '{parsed_query.target}'.")
+        # --- RAG INTEGRATION: GET GUIDANCE ---
+        logger.info(f"Querying Knowledge Base for guidance on: '{user_query}'")
+        guidance_from_rag = kb.get_workflow_suggestions(user_query)
+        logger.info(f"Retrieved guidance: {guidance_from_rag}")
+        cot_log.append(f"2. Retrieving guidance from knowledge base. Found: {guidance_from_rag}")
+
+        # --- INJECT KNOWLEDGE INTO THE PLANNER ---
+        cot_log.append(f"3. Asking AI Planner to generate a reasoned workflow for target '{parsed_query.target}'.")
         generator = WorkflowGenerator()
-        generation_result = generator.generate_workflow(parsed_query)
+        generation_result = generator.generate_workflow(
+            parsed_query=parsed_query,
+            guidance_from_rag=guidance_from_rag  # <--- NEW ARGUMENT
+        )
         workflow_plan = generation_result.get("plan", [])
         true_chain_of_thought = generation_result.get("reasoning", "No reasoning was provided by the planner.")
         cot_log.append("--- AI Planner's Reasoning ---\n" + true_chain_of_thought)
-        cot_log.append("3. Executing the workflow using geospatial tools...")
+
+        cot_log.append("4. Executing the workflow using geospatial tools...")
         executor = WorkflowExecutor()
         result_gdf = executor.execute_workflow(workflow_plan, parsed_query)
         feature_count = len(result_gdf)
-        cot_log.append(f"4. Execution complete. Found {feature_count} features.")
+        cot_log.append(f"5. Execution complete. Found {feature_count} features.")
+
+        # --- LEARNING LOOP: STORE SUCCESSFUL WORKFLOW ---
+        # This now happens before saving artifacts to capture total time.
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        logger.info(f"Workflow executed successfully in {elapsed_time:.2f} seconds. Storing in Knowledge Base.")
+        try:
+            kb.store_successful_workflow(
+                query=user_query,
+                workflow_steps=workflow_plan, # The plan is already a list of dicts
+                execution_time=elapsed_time,
+                data_types=["vector", "raster"] # Placeholder as requested
+            )
+            cot_log.append("6. Saved successful workflow to Knowledge Base for future reference.")
+        except Exception as kb_error:
+            logger.warning(f"Could not store successful workflow in Knowledge Base. Reason: {kb_error}")
+            cot_log.append("6. Warning: Could not save workflow to Knowledge Base.")
 
         # Save the plan and results as artifacts in MinIO
         try:
             minio_client = get_minio_client()
             bucket_name = "geospatial-results"
             
-            # Ensure bucket exists
             if not minio_client.bucket_exists(bucket_name):
                 minio_client.make_bucket(bucket_name)
             
-            # Save plan
             plan_object_name = f"{job_id}_plan.json"
             plan_bytes = json.dumps(workflow_plan, indent=2).encode('utf-8')
             minio_client.put_object(bucket_name, plan_object_name, io.BytesIO(plan_bytes), len(plan_bytes), 'application/json')
             
-            # Save result
             result_object_name = f"{job_id}_result.geojson"
             result_bytes = result_gdf.to_json().encode('utf-8')
             minio_client.put_object(bucket_name, result_object_name, io.BytesIO(result_bytes), len(result_bytes), 'application/geo+json')
-            cot_log.append(f"5. Saved artifacts to MinIO: '{plan_object_name}' and '{result_object_name}'.")
             
+            cot_log.append(f"7. Saved artifacts to MinIO: '{plan_object_name}' and '{result_object_name}'.")
             artifacts = {"plan_file": plan_object_name, "result_file": result_object_name}
         except Exception as minio_error:
             logger.warning(f"Failed to save artifacts to MinIO: {minio_error}")
             artifacts = {}
-            cot_log.append("5. Warning: Failed to save artifacts to MinIO.")
+            cot_log.append("7. Warning: Failed to save artifacts to MinIO.")
 
-        # 1. UPDATE THE SUCCESS RETURN STATEMENT
-        # NEW, CORRECTED VERSION
         response_data = {
             "response": f"Analysis complete! I found {feature_count} features for '{parsed_query.target}' in '{parsed_query.location}'.",
             "thinking_process": {"summary": "Successfully executed the geospatial workflow.", "chain_of_thought": cot_log},
             "artifacts": artifacts
         }
         return {
-            "status": "SUCCESS", # Use uppercase for consistency
+            "status": "SUCCESS",
             **response_data 
         }
     
     except QueryParserError as e:
-        # 2. UPDATE THE ERROR RETURN STATEMENTS
-        # NEW, CORRECTED VERSION
         return {
             "status": "ERROR",
             "response": f"I couldn't understand your query. {str(e)}",
@@ -173,7 +202,6 @@ def geospatial_planning_and_execution_tool(user_query: str, job_id: str) -> Dict
         }
     
     except LocationNotFoundError as e:
-        # FLATTENED AND CORRECTED VERSION
         return {
             "status": "ERROR",
             "response": f"I couldn't find the location '{e.location_name}'. Please check the spelling or try a larger city.",
@@ -182,7 +210,6 @@ def geospatial_planning_and_execution_tool(user_query: str, job_id: str) -> Dict
         
     except Exception as e:
         logger.error(f"[Job: {job_id}] Geospatial analysis failed: {e}", exc_info=True)
-        # FLATTENED AND CORRECTED VERSION
         return {
             "status": "ERROR",
             "response": f"I encountered an unexpected server error while analyzing your request. Please try again later.",
@@ -353,8 +380,6 @@ def format_chat_history(chat_history: List[Dict[str, Any]]) -> str:
 # MAIN CELERY TASK - CONDUCTOR AGENT
 # ================================
 
-# Step 4: Overhaul the execute_agentic_workflow Function (Action 4)
-# REPLACE THE ENTIRE BODY OF THE execute_agentic_workflow FUNCTION
 @celery.task(name="engine.execute_agentic_workflow", bind=True)
 def execute_agentic_workflow(self, task_input: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -362,8 +387,6 @@ def execute_agentic_workflow(self, task_input: Dict[str, Any]) -> Dict[str, Any]
     """
     job_id = self.request.id
     user_query = task_input.get('query', '').strip()
-    # The frontend now sends 'history'. Your old code looked for 'chat_history'.
-    # This standardizes on 'history' for consistency with the API.
     chat_history = task_input.get('history', []) 
 
     logger.info(f"[Job: {job_id}] Conductor received query: '{user_query}'")
@@ -399,7 +422,7 @@ def execute_agentic_workflow(self, task_input: Dict[str, Any]) -> Dict[str, Any]
         logger.info(f"[Job: {job_id}] RAG-informed LLM decision: use tool '{tool_to_use}'")
 
         # --- Step 3: Execute the LLM-chosen tool ---
-        if tool_to_use == "geospatial_tool": # <-- IMPORTANT: Matches the new, shorter name in the prompt
+        if tool_to_use == "geospatial_tool":
             return geospatial_planning_and_execution_tool(user_query, job_id)
         elif tool_to_use == "result_qa_tool":
             return result_qa_tool(user_query, chat_history)
@@ -409,11 +432,7 @@ def execute_agentic_workflow(self, task_input: Dict[str, Any]) -> Dict[str, Any]
 
     except Exception as e:
         logger.error(f"[Job: {job_id}] Conductor agent workflow FAILED: {e}", exc_info=True)
-        # Your old error handling was good, but Celery propagates exceptions.
-        # Raising the exception is often cleaner for the worker to handle failure states.
-        # The frontend can then interpret the task failure.
         self.update_state(state='FAILURE', meta={'exc_type': type(e).__name__, 'exc_message': str(e)})
-        # Re-raise the exception to mark the Celery task as failed.
         raise
 
 
@@ -433,9 +452,6 @@ def cleanup_old_jobs():
     try:
         job_keys = redis_client.keys("job:*")
         cleaned_count = 0
-        
-        # In a real implementation, you would check timestamps and delete old keys
-        # For now, just return the count
         
         return {
             "status": "completed",

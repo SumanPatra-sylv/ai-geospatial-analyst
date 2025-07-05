@@ -4,6 +4,7 @@
 fastapi
 uvicorn[standard]
 celery[redis]
+Jinja2
 requests
 
 # --- LangChain & AI Core ---
@@ -19,6 +20,8 @@ geopandas
 osmnx
 rasterio
 rasterstats
+elevation
+geopy
 #psycopg2-binary
 #SQLAlchemy
 #GeoAlchemy2

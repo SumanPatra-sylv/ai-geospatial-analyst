@@ -1,7 +1,8 @@
-# docker-compose.yml - FINAL, GUARANTEED CORRECT AND ROBUST VERSION
+# docker-compose.yml - FINAL, MODERN, AND ROBUST VERSION
 
 services:
-  # Redis service (unchanged and correct)
+  # --- INFRASTRUCTURE SERVICES ---
+
   redis:
     image: redis:7-alpine
     ports: ["6379:6379"]
@@ -12,8 +13,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 3
+    restart: unless-stopped
 
-  # MinIO service - its only job is to run the server.
   minio:
     image: minio/minio:latest
     ports:
@@ -23,17 +24,15 @@ services:
       - minio_data:/data
     networks:
       - app-network
-    environment:
-      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
-      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
+    env_file: .env
     command: server /data --console-address ":9001"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 30s
       timeout: 20s
       retries: 3
+    restart: unless-stopped
 
-  # Dedicated service for MinIO initialization
   minio-init:
     image: minio/mc:latest
     depends_on:
@@ -41,86 +40,80 @@ services:
         condition: service_healthy
     networks:
       - app-network
+    env_file: .env
     entrypoint: >
       /bin/sh -c "
-      echo 'Waiting for MinIO to be ready...';
       /usr/bin/mc alias set myminio http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD};
       /usr/bin/mc mb myminio/geospatial-results --ignore-existing;
       /usr/bin/mc policy set public myminio/geospatial-results;
       echo 'MinIO bucket initialization completed successfully.';
       "
 
-  # API service now depends on minio-init and can connect to Ollama
+  # --- APPLICATION SERVICES ---
+
+  x-app-base: &app-base
+    build:
+      context: .
+      dockerfile: deployment/docker/Dockerfile
+    volumes:
+      - ./src:/app/src
+    networks:
+      - app-network
+    env_file: .env
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
   api:
-    build:
-      context: .
-      dockerfile: deployment/docker/dockerfile
+    <<: *app-base
     ports: ["8000:8000"]
-    networks: ["app-network"]
+    command: uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
     depends_on:
       redis:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
     environment:
-      - CELERY_BROKER_URL=redis://redis:6379/0
-      - CELERY_RESULT_BACKEND=redis://redis:6379/0
-      - MINIO_ENDPOINT=minio:9000
-      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
-      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
-      - REDIS_HOST=redis
-      # --- FIX 1 of 2: Added OLLAMA_BASE_URL to the API service ---
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
-    volumes: ["./src:/app/src"]
-    command: ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 
-  # Worker service now depends on minio-init and can connect to Ollama
   worker:
-    build:
-      context: .
-      dockerfile: deployment/docker/dockerfile
-    command: ["celery", "-A", "src.worker.celery_app", "worker", "--loglevel=info", "--concurrency=2"]
-    networks: ["app-network"]
+    <<: *app-base
+    command: celery -A src.worker.celery_app worker --loglevel=info --concurrency=2
     depends_on:
       redis:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
     environment:
-      - CELERY_BROKER_URL=redis://redis:6379/0
-      - CELERY_RESULT_BACKEND=redis://redis:6379/0
-      - MINIO_ENDPOINT=minio:9000
-      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
-      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
-      - REDIS_HOST=redis
-      # --- FIX 2 of 2: Added OLLAMA_BASE_URL to the Worker service ---
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
-    volumes: ["./src:/app/src"]
 
-  # Celery Beat and Frontend are correct and need no changes.
   celery-beat:
-    build: { context: ., dockerfile: deployment/docker/dockerfile }
-    networks: [app-network]
-    depends_on: { redis: { condition: service_healthy } }
-    environment: { CELERY_BROKER_URL: "redis://redis:6379/0", CELERY_RESULT_BACKEND: "redis://redis:6379/0", REDIS_HOST: redis }
-    volumes: ["./src:/app/src", "celery_beat_data:/app/celery"]
-    command: sh -c "celery -A src.worker.celery_app beat --loglevel=info --schedule=/app/celery/celerybeat-schedule"
+    <<: *app-base
+    command: celery -A src.worker.celery_app beat --loglevel=info -s /app/celerybeat-schedule
+    volumes:
+      - ./src:/app/src
+      - celery_beat_data:/app
+    depends_on:
+      - redis
 
   frontend:
-    build: { context: ., dockerfile: deployment/docker/dockerfile }
+    <<: *app-base
     ports: ["8501:8501"]
-    networks: [app-network]
-    depends_on: [api]
-    environment: { API_BASE_URL: "http://api:8000" }
-    volumes: ["./src:/app/src"]
-    command: ["streamlit", "run", "src/ui/app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    command: streamlit run src/ui/app.py --server.port=8501 --server.address=0.0.0.0
+    depends_on:
+      - api
+    environment:
+      - API_BASE_URL=http://api:8000
 
   prometheus:
     image: prom/prometheus:latest
     ports: ["9090:9090"]
-    networks: [app-network]
+    networks: ["app-network"]
     volumes: ["./deployment/prometheus:/etc/prometheus", "prometheus_data:/prometheus"]
     command: ['--config.file=/etc/prometheus/prometheus.yml']
+    restart: unless-stopped
+
+# --- VOLUMES & NETWORKS DEFINITIONS ---
 
 volumes:
   redis_data:
