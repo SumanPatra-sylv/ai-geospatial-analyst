@@ -1,4 +1,4 @@
-# app.py (Refactored Frontend - Pure API Client) - FINAL CORRECTED VERSION
+# app.py (Refactored Frontend - Pure API Client) - FINAL MODIFIED VERSION
 
 import streamlit as st
 import requests
@@ -8,7 +8,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit.components.v1 as components
 import json
-import time # <<< FIX: Added for polling delay
+import time
 
 # ==============================================================================
 # 1. CONFIGURATION AND CONSTANTS
@@ -61,24 +61,30 @@ class GeospatialAPIClient:
             # If polling fails, return a FAILURE status to stop the loop.
             return {"status": "FAILURE", "error": f"Polling failed: {str(e)}"}
 
-    def process_query(self, query, session_id=None):
-        """Send a query to the backend to START processing."""
+    # CHANGE 1: SIMPLIFY THE API CLIENT
+    def process_query(self, query, session_id=None, history=None):
+        """Sends query and history to the backend."""
         try:
-            payload = {"query": query}
-            if session_id:
-                payload["session_id"] = session_id
+            # The payload now correctly includes the chat history
+            payload = {
+                "query": query,
+
+                # This key MUST match the Pydantic model in your jobs.py
+                # If your model uses 'history', keep this as 'history'.
+                # If your model uses 'chat_history', change it here.
+                "history": history or [],
+
+                "session_id": session_id
+            }
+            response = self.session.post(f"{self.base_url}/start", json=payload, timeout=30)
             
-            # The correct endpoint is /jobs/start
-            response = self.session.post(
-                f"{self.base_url}/start",
-                json=payload,
-                timeout=30  # Initial request can have a short timeout
-            )
+            # We no longer need the special 422 check. We just check for any error.
             response.raise_for_status()
             return response.json()
-        except Exception as e:
-            # This error is now more specific to the job *submission* failing
-            return {"error": str(e)}
+            
+        except requests.exceptions.RequestException as e:
+            # This will now catch all connection or HTTP errors.
+            return {"error": f"Failed to communicate with the backend: {str(e)}"}
 
     def upload_file(self, file_data, filename):
         """Upload a file to the src."""
@@ -145,16 +151,20 @@ class EnhancedGeospatialApp:
         # Enhanced CSS styling
         st.markdown("""
         <style>
+        /* FIX 1: The CSS Change - Replaced the existing .thinking-box style */
         .thinking-box { 
-            background-color: #f8f9fa; 
-            border-left: 5px solid #28a745; 
+            background-color: #1E1E2E; /* Dark blue/purple background for a modern tech look */
+            border-left: 5px solid #00A2FF; /* A vibrant blue accent */
             padding: 15px; 
             border-radius: 8px; 
-            font-family: 'Courier New', monospace; 
+            font-family: 'Consolas', 'Courier New', monospace; 
+            color: #E0E0E0; /* Light grey text for high contrast and readability */
             white-space: pre-wrap; 
+            word-wrap: break-word;
+            min-height: 100px;
             max-height: 70vh; 
             overflow-y: auto; 
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.3); /* Deeper shadow for depth */
         }
         .status-success { 
             background-color: #d4edda; 
@@ -449,29 +459,33 @@ class EnhancedGeospatialApp:
         with col1:
             st.subheader("💬 Interactive Analysis Chat")
             
+            # Display all messages from history
             for msg in st.session_state.messages:
                 with st.chat_message(msg["role"]): 
                     st.markdown(msg["content"])
             
             example_prompts = [
                 "Load and analyze the sample data",
+                "Generate a visualization of the data",
+                "Show and summarize all landuse features in Potsdam, Germany",
                 "Create a buffer analysis around points",
                 "Calculate area statistics for polygons",
-                "Perform spatial intersection analysis",
-                "Generate a visualization of the data"
+                "Perform spatial intersection analysis"
             ]
             
             with st.expander("💡 Example Queries", expanded=False):
                 for i, prompt in enumerate(example_prompts):
                     if st.button(f"{i+1}. {prompt}", key=f"example_{i}"):
-                        st.session_state.example_prompt = prompt
-            
+                        self.process_user_query(prompt)
+                        st.rerun()
+
+            # Step 3: Call the new fragment.
             if prompt := st.chat_input("Describe your geospatial analysis task..."):
                 self.process_user_query(prompt)
-            
-            if hasattr(st.session_state, 'example_prompt'):
-                self.process_user_query(st.session_state.example_prompt)
-                del st.session_state.example_prompt
+                st.rerun() # Trigger the rerun after handling the input
+
+            # Add this line to call the new fragment
+            self.handle_assistant_response()
         
         with col2:
             st.subheader("🧠 Analysis Status")
@@ -489,89 +503,86 @@ class EnhancedGeospatialApp:
                 else:
                     st.info("No workflow history yet")
 
-    # SURGICAL FIX 2: Replace process_user_query with a Robust Polling Version
-    def process_user_query(self, prompt):
-        """Process user query via API with robust status polling."""
+    # Step 1: Replace the process_user_query method.
+    def process_user_query(self, prompt: str):
+        """Adds user query to chat history and triggers a re-run to process it."""
         if not st.session_state.backend_connected:
             st.error("❌ Backend not connected")
             return
-
+        
         st.session_state.processing_stats['total_queries'] += 1
         st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+        # Don't do any processing here, just rerun.
+        # The main script flow will handle displaying the new message and calling the assistant.
 
-        with st.chat_message("assistant"):
-            start_time = datetime.now()
-            try:
-                # Part 1: Submit the job
-                st.session_state.thinking_process = "🤖 Sending query to backend..."
-                initial_result = self.api_client.process_query(prompt, session_id=st.session_state.session_id)
+    # Step 2: Add the handle_assistant_response method.
+    @st.fragment
+    def handle_assistant_response(self):
+        """A self-contained fragment to handle polling and displaying the assistant's response."""
+        # This logic only runs if the last message was from the user
+        if st.session_state.messages and st.session_state.messages[-1]["role"] == "user":
+            prompt = st.session_state.messages[-1]["content"]
 
-                if not initial_result.get("job_id"):
-                    error_msg = f"❌ Backend Error: {initial_result.get('error', 'Failed to start job.')}"
-                    st.error(error_msg)
-                    st.session_state.processing_stats['failed_queries'] += 1
-                    return
+            with st.chat_message("assistant"):
+                start_time = time.time()
+                job_id = None
+                try:
+                    # Step 1: Submit the job
+                    with st.spinner("🚀 Submitting job to the Conductor Agent..."):
+                        initial_response = self.api_client.process_query(
+                            query=prompt,
+                            history=st.session_state.messages[:-1]
+                        )
 
-                job_id = initial_result["job_id"]
-                st.info(f"✅ Job `{job_id}` started. Polling for results...")
+                    if "job_id" not in initial_response:
+                        error_msg = f"❌ Request Rejected: {initial_response.get('error', 'Failed to start job.')}"
+                        st.error(error_msg)
+                        st.session_state.messages.append({"role": "assistant", "content": error_msg})
+                        st.session_state.processing_stats['failed_queries'] += 1
+                        return
 
-                # Part 2: Poll for the result
-                final_status = None
-                with st.spinner("🧠 AI Analyst is processing..."):
+                    job_id = initial_response["job_id"]
+                    st.info(f"✅ Job `{job_id}` accepted. The AI Analyst is now at work...")
+
+                    # Step 2: Poll for the result
+                    final_result = None
+                    progress_bar = st.progress(0, text="🧠 AI processing...")
                     while True:
                         status_response = self.api_client.get_job_status(job_id)
-                        current_status = status_response.get("status")
+                        status = status_response.get("status")
+                        if status in ["SUCCESS", "FAILURE"]:
+                            final_result = status_response.get("result", {})
+                            progress_bar.progress(100, text="✅ Complete!")
+                            break
+                        time.sleep(1.5)
 
-                        if current_status in ["SUCCESS", "FAILURE"]:
-                            final_status = status_response
-                            break  # Exit the loop
-
-                        # Optional: Update UI with progress from backend
-                        if current_status == "PROGRESS" and status_response.get("progress"):
-                            progress_meta = status_response["progress"]
-                            stage = progress_meta.get('stage', 'working')
-                            st.session_state.thinking_process = f"🧠 Status: {stage}..."
+                    # Step 3: Process and Display the final rich result
+                    if final_result and final_result.get("status") == "SUCCESS":
+                        st.session_state.processing_stats['successful_queries'] += 1
+                        response_text = final_result.get("response", "Analysis complete!")
+                        st.markdown(response_text)
+                        st.session_state.messages.append({"role": "assistant", "content": response_text})
                         
-                        time.sleep(2)  # Wait 2 seconds before checking again
-
-                # Part 3: Process the final result
-                end_time = datetime.now()
-                processing_time = (end_time - start_time).total_seconds()
-
-                if final_status and final_status.get("status") == "SUCCESS":
-                    result_data = final_status.get("result", {})
-                    # This is the line that was likely causing the error before.
-                    # We now use .get() to safely access the response.
-                    response_text = result_data.get("response", "Analysis complete! Results processed successfully.")
-
-                    st.markdown(response_text)
-                    st.session_state.messages.append({"role": "assistant", "content": response_text})
-                    st.session_state.processing_stats['successful_queries'] += 1
-                    st.success(f"✅ Analysis completed in {processing_time:.2f} seconds.")
-
-                    # Safely check for a map file and display it
-                    if result_data and result_data.get("map_file"):
-                        map_url = f"{BACKEND_URL}/maps/{result_data['map_file']}"
-                        try:
-                            map_response = requests.get(map_url)
-                            map_response.raise_for_status()
-                            with st.expander("🗺️ View Interactive Map", expanded=True):
-                                components.html(map_response.text, height=500, scrolling=True)
-                        except Exception as map_error:
-                            st.warning(f"🗺️ Map generated but could not be displayed: {map_error}")
-
-                else: # Handle job failure
-                    error_msg = f"❌ Backend Job Failed: {final_status.get('error', 'Unknown execution error.')}"
-                    st.error(error_msg)
+                        thinking_data = final_result.get("thinking_process", {})
+                        if isinstance(thinking_data, dict) and "chain_of_thought" in thinking_data:
+                            summary = thinking_data.get("summary", "Done.")
+                            cot_log = "\n".join(thinking_data.get("chain_of_thought", []))
+                            st.session_state.thinking_process = f"**Summary:** {summary}\n\n**Chain of Thought:**\n{cot_log}"
+                        
+                        if final_result.get("artifacts"):
+                            with st.expander("📄 View Generated Artifacts", expanded=True):
+                                for key, value in final_result["artifacts"].items():
+                                    st.markdown(f"- **{key.replace('_', ' ').title()}:** `{value}`")
+                    else: # Handle job failure
+                        st.session_state.processing_stats['failed_queries'] += 1
+                        error_response = final_result.get("response", "An unknown error occurred.")
+                        st.error(f"**Analysis Failed:** {error_response}")
+                        st.session_state.messages.append({"role": "assistant", "content": f"Error: {error_response}"})
+                except Exception as e:
                     st.session_state.processing_stats['failed_queries'] += 1
-
-            except Exception as e:
-                # This catches errors in the frontend logic itself
-                st.error(f"❌ Frontend Communication Error: {str(e)}")
-                st.session_state.processing_stats['failed_queries'] += 1
-
+                    st.error(f"A critical error occurred: {str(e)}")
+                    st.session_state.messages.append({"role": "assistant", "content": f"Error: {str(e)}"})
+    
     def render_advanced_features(self):
         """Render advanced features panel."""
         st.subheader("🚀 Advanced Features")
@@ -599,11 +610,13 @@ class EnhancedGeospatialApp:
                 if st.button("📈 Data Summary", use_container_width=True):
                     summary_prompt = "Provide a comprehensive summary of all loaded geospatial data."
                     self.process_user_query(summary_prompt)
+                    st.rerun()
             
             with col2:
                 if st.button("🗺️ Quick Visualization", use_container_width=True):
                     viz_prompt = "Create a basic visualization of the loaded geospatial data."
                     self.process_user_query(viz_prompt)
+                    st.rerun()
         
         with st.expander("🎯 Specialized Analysis", expanded=False):
             analysis_type = st.selectbox(
@@ -625,6 +638,7 @@ class EnhancedGeospatialApp:
                 
                 if prompt:
                     self.process_user_query(prompt)
+                    st.rerun()
 
     def export_session_data(self):
         """Export session data and results."""

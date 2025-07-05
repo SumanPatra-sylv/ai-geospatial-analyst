@@ -27,6 +27,11 @@ except ImportError:
 
 import geopandas as gpd
 
+# --- MODIFICATION 1: Add the LocationNotFoundError custom exception ---
+class LocationNotFoundError(Exception):
+    """Custom exception raised when a location cannot be found by the geocoding service (e.g., OSMnx)."""
+    pass
+
 class WorkflowExecutor:
     """
     Executes spatial analysis workflows based on structured plans.
@@ -37,8 +42,6 @@ class WorkflowExecutor:
         self.smart_data_loader = SmartDataLoader(base_data_dir="data")
         self.data_layers: Dict[str, gpd.GeoDataFrame] = {}
     
-    # --- FIX 1: The method signature is updated to accept the `parsed_query`. ---
-    # This provides the necessary context (like location) for the entire workflow.
     def execute_workflow(self, workflow_plan: List[Dict[str, Any]], parsed_query: ParsedQuery) -> gpd.GeoDataFrame:
         """
         Execute a complete workflow plan step by step.
@@ -63,9 +66,6 @@ class WorkflowExecutor:
             
             print(f"Step {i}/{len(workflow_plan)}: Executing '{operation}' -> '{output_layer}'")
             
-            # --- FIX 2: Inject the location context into the loading step. ---
-            # This is the core of the fix. Before executing the load operation, we ensure
-            # its parameters contain the correct location from the parsed query.
             if operation == 'load_osm_data':
                 step['location'] = parsed_query.location
             
@@ -86,14 +86,21 @@ class WorkflowExecutor:
         
         return final_result
     
-    # --- The helper methods below this line require NO CHANGES. ---
-    # They will now work correctly because the main loop provides the right parameters.
-
+    # --- MODIFICATION 2: Modify _op_load_osm_data to handle location errors ---
     def _op_load_osm_data(self, params: Dict[str, Any]) -> gpd.GeoDataFrame:
-        # This function now correctly receives 'location' from the main loop.
+        """
+        Loads OSM data for a given location, handling cases where the location is not found.
+        """
         location = params['location']
         print(f"    Loading OSM landuse data for: {location}")
-        return self.smart_data_loader.fetch_osm_landuse(location)
+        try:
+            return self.smart_data_loader.fetch_osm_landuse(location)
+        except Exception as e:
+            # Catch a broad exception as osmnx can raise different errors for invalid locations.
+            # We wrap it in our specific, more meaningful exception for the agent to handle.
+            error_message = f"Could not find or process location '{location}'. The geocoding service failed."
+            print(f"      ERROR: {error_message} (Original error: {e})")
+            raise LocationNotFoundError(error_message) from e
     
     def _op_filter_by_category(self, params: Dict[str, Any]) -> gpd.GeoDataFrame:
         input_gdf = self.data_layers[params['input_layer']]
@@ -182,7 +189,6 @@ if __name__ == '__main__':
     print("\n[PHASE 2] Executing generated workflow plan...")
     executor = WorkflowExecutor()
     try:
-        # --- FIX 3: Update the test call to match the new method signature. ---
         final_result = executor.execute_workflow(plan, query)
         
         print("\n=== FINAL RESULT ===")
