@@ -13,7 +13,7 @@ class GeospatialKnowledgeBase:
     Stores successful workflows, common patterns, and expert knowledge.
     """
     
-    def __init__(self, db_path: str = "geospatial_knowledge.db"):
+    def __init__(self, db_path: str = "data/knowledge_base/geospatial_knowledge.db"):
         self.db_path = db_path
         self.encoder = SentenceTransformer('all-MiniLM-L6-v2')
         self.index = None
@@ -228,19 +228,3 @@ def enhance_agent_with_rag(agent_executor, knowledge_base: GeospatialKnowledgeBa
     agent_executor.tools.insert(1, rag_tool)
     
     return agent_executor
-
-# Usage example for integration
-def create_enhanced_geospatial_agent():
-    """Create agent with RAG enhancement."""
-    from core.agent import create_geospatial_agent # Import base agent
-    
-    # Initialize knowledge base
-    kb = GeospatialKnowledgeBase()
-    
-    # Create base agent
-    agent = create_geospatial_agent()
-    
-    # Enhance with RAG
-    enhanced_agent = enhance_agent_with_rag(agent, kb)
-    
-    return enhanced_agent, kb

@@ -1,0 +1,14 @@
+{
+  "commands": [
+    {
+      "user_phrase": "Load and analyze the sample data",
+      "action": "execute_pre-canned_query",
+      "pre-canned_query": "Show and summarize all landuse features in Potsdam, Germany"
+    },
+    {
+      "user_phrase": "Generate a visualization of the data",
+      "action": "execute_pre-canned_query",
+      "pre-canned_query": "Create a folium map of the last result"
+    }
+  ]
+}

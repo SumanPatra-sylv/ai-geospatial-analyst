@@ -1,0 +1,138 @@
+# docker-compose.yml - FINAL, SECURE, AND ROBUST VERSION
+
+version: '3.8'
+
+services:
+  # --- INFRASTRUCTURE SERVICES ---
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    volumes: ["redis_data:/data"]
+    networks: ["app-network"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - app-network
+    env_file: .env
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    restart: unless-stopped
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - app-network
+    env_file: .env
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc alias set myminio http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD};
+      /usr/bin/mc mb myminio/geospatial-results --ignore-existing;
+      /usr/bin/mc policy set public myminio/geospatial-results;
+      echo 'MinIO bucket initialization completed successfully.';
+      "
+
+  # --- APPLICATION SERVICES ---
+
+  x-app-base: &app-base
+    build:
+      context: .
+      dockerfile: deployment/docker/Dockerfile
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+    networks:
+      - app-network
+    env_file: .env
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  api:
+    <<: *app-base
+    ports: ["8000:8000"]
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      # --- FIX: Provide the correct network address for MinIO ---
+      - MINIO_ENDPOINT=minio:9000
+
+  worker:
+    <<: *app-base
+    command: celery -A worker.celery_app worker --loglevel=info --concurrency=2
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      # --- FIX: Provide the correct network address for MinIO ---
+      - MINIO_ENDPOINT=minio:9000
+
+  celery-beat:
+    <<: *app-base
+    # --- FIX: Point schedule to the dedicated /app/celery directory ---
+    command: celery -A worker.celery_app beat --loglevel=info -s /app/celery/celerybeat-schedule
+    volumes:
+      # --- FIX: Explicitly define all required volumes ---
+      # The base volumes are re-declared here to avoid YAML anchor override issues,
+      # and we add the specific volume for the beat schedule.
+      - ./src:/app/src
+      - ./data:/app/data
+      - celery_beat_data:/app/celery
+    depends_on:
+      - redis
+
+  frontend:
+    <<: *app-base
+    ports: ["8501:8501"]
+    command: streamlit run src/ui/app.py --server.port=8501 --server.address=0.0.0.0
+    depends_on:
+      - api
+    environment:
+      - API_BASE_URL=http://api:8000
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports: ["9090:9090"]
+    networks: ["app-network"]
+    volumes: ["./deployment/prometheus:/etc/prometheus", "prometheus_data:/prometheus"]
+    command: ['--config.file=/etc/prometheus/prometheus.yml']
+    restart: unless-stopped
+
+# --- VOLUMES & NETWORKS DEFINITIONS ---
+
+volumes:
+  redis_data:
+  minio_data:
+  celery_beat_data:
+  prometheus_data:
+
+networks:
+  app-network:
+    driver: bridge

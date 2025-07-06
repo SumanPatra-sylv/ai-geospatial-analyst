@@ -1,0 +1,75 @@
+# ===================================================================
+# STAGE 1: "Builder" - Installs dependencies & pre-warms AI cache
+# ===================================================================
+FROM python:3.11-slim AS builder
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV VIRTUAL_ENV=/opt/venv
+RUN python3 -m venv $VIRTUAL_ENV
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
+# Install OS dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libgdal-dev \
+    curl \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python requirements
+COPY requirements.txt .
+RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt
+
+# Pre-warm the cache
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+
+# ===================================================================
+# STAGE 2: "Final" - Creates the lean, final production image
+# ===================================================================
+FROM python:3.11-slim AS final
+
+WORKDIR /app
+
+# Set Python path and other environment variables
+ENV PYTHONPATH="${PYTHONPATH}:/app/src"
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
+# --- FIX 1: Install 'gosu' for secure user switching ---
+# 'gosu' is a lightweight 'sudo' alternative, perfect for containers.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgdal-dev \
+    gosu \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy pre-built virtual environment and model cache from the builder stage
+COPY --from=builder $VIRTUAL_ENV $VIRTUAL_ENV
+COPY --from=builder /root/.cache /root/.cache
+
+# Copy application code
+COPY ./src ./src
+
+# Create non-root user and necessary directories
+# This sets up the correct structure within the image itself.
+RUN useradd --create-home appuser && \
+    mkdir -p /app/data /app/celery && \
+    chown -R appuser:appuser /app/data /app/celery
+
+# --- FIX 2: Copy and configure the entrypoint script ---
+# This script will run as root when the container starts to fix permissions on mounted volumes.
+# The path here must match the path in your project structure.
+COPY ./deployment/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# --- FIX 3: Set the ENTRYPOINT ---
+# This tells Docker to always execute our script first.
+ENTRYPOINT ["entrypoint.sh"]
+
+# --- FIX 4: REMOVE the 'USER appuser' line ---
+# The entrypoint script now handles switching to the 'appuser'.
+# If you leave this in, the entrypoint itself will fail because it won't have root permissions.
+# USER appuser

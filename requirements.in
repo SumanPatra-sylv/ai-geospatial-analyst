@@ -1,0 +1,41 @@
+# requirements.in - Final Consolidated Version
+
+# --- API & Worker ---
+fastapi
+uvicorn[standard]
+celery[redis]
+Jinja2
+requests
+
+# --- LangChain & AI Core ---
+langchain
+langchain-openai
+langgraph
+sentence-transformers
+faiss-cpu
+torch
+
+# --- Geospatial & Data ---
+geopandas
+osmnx
+rasterio
+rasterstats
+elevation
+geopy
+#psycopg2-binary
+#SQLAlchemy
+#GeoAlchemy2
+
+# --- Frontend & Visualization ---
+streamlit
+folium
+
+# --- Infrastructure & Monitoring ---
+prometheus-client
+minio
+boto3
+python-dotenv
+# --- CORE SCIENTIFIC LIBRARIES ---
+setuptools>=69.0.0
+numpy==1.25.2
+scipy>=1.11
