@@ -1,0 +1,3 @@
+# Always use LF line endings for shell scripts to ensure they are
+# executable in Linux environments like Docker containers.
+*.sh eol=lf

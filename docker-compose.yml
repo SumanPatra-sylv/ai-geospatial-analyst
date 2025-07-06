@@ -1,4 +1,6 @@
-# docker-compose.yml - FINAL, MODERN, AND ROBUST VERSION
+# docker-compose.yml - FINAL, SECURE, AND ROBUST VERSION
+
+version: '3.8'
 
 services:
   # --- INFRASTRUCTURE SERVICES ---
@@ -57,6 +59,7 @@ services:
       dockerfile: deployment/docker/Dockerfile
     volumes:
       - ./src:/app/src
+      - ./data:/app/data
     networks:
       - app-network
     env_file: .env
@@ -67,7 +70,7 @@ services:
   api:
     <<: *app-base
     ports: ["8000:8000"]
-    command: uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
     depends_on:
       redis:
         condition: service_healthy
@@ -75,10 +78,12 @@ services:
         condition: service_completed_successfully
     environment:
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      # --- FIX: Provide the correct network address for MinIO ---
+      - MINIO_ENDPOINT=minio:9000
 
   worker:
     <<: *app-base
-    command: celery -A src.worker.celery_app worker --loglevel=info --concurrency=2
+    command: celery -A worker.celery_app worker --loglevel=info --concurrency=2
     depends_on:
       redis:
         condition: service_healthy
@@ -86,13 +91,20 @@ services:
         condition: service_completed_successfully
     environment:
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      # --- FIX: Provide the correct network address for MinIO ---
+      - MINIO_ENDPOINT=minio:9000
 
   celery-beat:
     <<: *app-base
-    command: celery -A src.worker.celery_app beat --loglevel=info -s /app/celerybeat-schedule
+    # --- FIX: Point schedule to the dedicated /app/celery directory ---
+    command: celery -A worker.celery_app beat --loglevel=info -s /app/celery/celerybeat-schedule
     volumes:
+      # --- FIX: Explicitly define all required volumes ---
+      # The base volumes are re-declared here to avoid YAML anchor override issues,
+      # and we add the specific volume for the beat schedule.
       - ./src:/app/src
-      - celery_beat_data:/app
+      - ./data:/app/data
+      - celery_beat_data:/app/celery
     depends_on:
       - redis
 
