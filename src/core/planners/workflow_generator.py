@@ -10,13 +10,13 @@ import os
 import jinja2
 import requests
 from typing import List, Dict, Any
-from pantic import BaseModel, Field
+from pydantic import BaseModel, Field
 from pprint import pprint
 
 
 # This try/except block is preserved for standalone testing.
 try:
-    from src.core.planners.query_parser import ParsedQuery, SpatialConstraint, SpatialRelationship
+    from core.planners.query_parser import ParsedQuery, SpatialConstraint, SpatialRelationship
 except ImportError:
     # Fallback for standalone testing
     from enum import Enum

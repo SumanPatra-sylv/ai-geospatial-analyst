@@ -232,7 +232,7 @@ def enhance_agent_with_rag(agent_executor, knowledge_base: GeospatialKnowledgeBa
 # Usage example for integration
 def create_enhanced_geospatial_agent():
     """Create agent with RAG enhancement."""
-    from src.core.agent import create_geospatial_agent # Import base agent
+    from core.agent import create_geospatial_agent # Import base agent
     
     # Initialize knowledge base
     kb = GeospatialKnowledgeBase()

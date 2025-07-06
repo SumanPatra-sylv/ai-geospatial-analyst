@@ -1,5 +1,4 @@
 # src/worker/tasks.py - CONDUCTOR AGENT IMPLEMENTATION WITH FOLLOW-UP Q&A
-
 import os
 import time
 import redis
@@ -12,15 +11,15 @@ from celery.utils.log import get_task_logger
 from typing import Dict, Any, List, Optional
 
 # Import the celery app instance
-from src.worker.celery_app import celery
+from worker.celery_app import celery
 
 # Import all necessary AI pipeline components
-from src.core.executors.workflow_executor import WorkflowExecutor, LocationNotFoundError
-from src.core.planners.workflow_generator import WorkflowGenerator
-from src.core.planners.query_parser import QueryParser, QueryParserError
-from src.core.knowledge_base import KnowledgeBase # For the Conductor Agent
+from core.executors.workflow_executor import WorkflowExecutor, LocationNotFoundError
+from core.planners.workflow_generator import WorkflowGenerator
+from core.planners.query_parser import QueryParser, QueryParserError
+from core.knowledge_base import KnowledgeBase # For the Conductor Agent
 # Import the new Knowledge Base for the Geospatial Tool
-from src.core.rag.geospatial_knowledge import GeospatialKnowledgeBase
+from rag.geospatial_knowledge import GeospatialKnowledgeBase
 
 
 # Redis client for storing job status updates
@@ -31,6 +30,7 @@ try:
         db=0,
         decode_responses=True
     )
+    redis_client.ping() # Check connection on startup
 except Exception as e:
     print(f"Warning: Redis connection failed in tasks: {e}")
     redis_client = None
@@ -42,8 +42,6 @@ logger = get_task_logger(__name__)
 # CONDUCTOR AGENT SYSTEM PROMPT - UPDATED
 # ================================
 
-# Step 3: Upgrade the CONDUCTOR_SYSTEM_PROMPT (Action 3)
-# REPLACE THE ENTIRE CONDUCTOR_SYSTEM_PROMPT STRING
 CONDUCTOR_SYSTEM_PROMPT = """You are a master conductor for an AI Geospatial Analyst. Your job is to analyze the user's query, conversation history, AND the provided real-time system context to decide which tool to use.
 
 **[RETRIEVED SYSTEM CONTEXT]**
@@ -80,8 +78,6 @@ def get_minio_client():
         secure=False
     )
 
-# Step 2: Add the find_special_command Helper Function (Action 5)
-# ADD THIS HELPER FUNCTION (ideally after get_minio_client)
 def find_special_command(user_query: str) -> Optional[Dict[str, Any]]:
     """Checks for hardcoded commands to bypass the LLM for common UI actions."""
     try:
@@ -132,7 +128,7 @@ def geospatial_planning_and_execution_tool(user_query: str, job_id: str) -> Dict
         generator = WorkflowGenerator()
         generation_result = generator.generate_workflow(
             parsed_query=parsed_query,
-            guidance_from_rag=guidance_from_rag  # <--- NEW ARGUMENT
+            guidance_from_rag=guidance_from_rag
         )
         workflow_plan = generation_result.get("plan", [])
         true_chain_of_thought = generation_result.get("reasoning", "No reasoning was provided by the planner.")
@@ -145,16 +141,24 @@ def geospatial_planning_and_execution_tool(user_query: str, job_id: str) -> Dict
         cot_log.append(f"5. Execution complete. Found {feature_count} features.")
 
         # --- LEARNING LOOP: STORE SUCCESSFUL WORKFLOW ---
-        # This now happens before saving artifacts to capture total time.
         end_time = time.time()
         elapsed_time = end_time - start_time
         logger.info(f"Workflow executed successfully in {elapsed_time:.2f} seconds. Storing in Knowledge Base.")
         try:
+            # --- IMPROVEMENT: Dynamically infer data types from the plan ---
+            used_data_types = set()
+            for step in workflow_plan:
+                op = step.get("operation", "")
+                if "load_osm_data" in op:
+                    used_data_types.add("vector")
+                if "load_dem_data" in op:
+                    used_data_types.add("raster")
+            
             kb.store_successful_workflow(
                 query=user_query,
-                workflow_steps=workflow_plan, # The plan is already a list of dicts
+                workflow_steps=workflow_plan,
                 execution_time=elapsed_time,
-                data_types=["vector", "raster"] # Placeholder as requested
+                data_types=list(used_data_types) if used_data_types else ["vector"] # Use inferred types, with a safe default
             )
             cot_log.append("6. Saved successful workflow to Knowledge Base for future reference.")
         except Exception as kb_error:
@@ -201,6 +205,7 @@ def geospatial_planning_and_execution_tool(user_query: str, job_id: str) -> Dict
             "thinking_process": {"summary": "Failed to parse the user's query.", "chain_of_thought": [f"Error: {str(e)}"]}
         }
     
+    # This block now provides a more specific error message to the user.
     except LocationNotFoundError as e:
         return {
             "status": "ERROR",
@@ -249,21 +254,11 @@ Your Answer:"""
 
 
 def conversational_tool(user_query: str) -> Dict[str, Any]:
-    """
-    Handles non-geospatial queries with conversational responses
-    
-    Args:
-        user_query: User's conversational query
-        
-    Returns:
-        Dictionary containing conversational response
-    """
+    """Handles non-geospatial queries with conversational responses."""
     logger.info(f"Handling conversational query: '{user_query}'")
     
-    # Analyze query for appropriate response
     query_lower = user_query.lower().strip()
     
-    # Greeting responses
     if any(greeting in query_lower for greeting in ['hello', 'hi', 'hey', 'greetings']):
         return {
             "response": "Hello! I'm your Geospatial AI Analyst. I can help you find and analyze location-based information. Try asking me something like 'Find restaurants in downtown Portland' or 'Show me hospitals near Central Park'.",
@@ -271,7 +266,6 @@ def conversational_tool(user_query: str) -> Dict[str, Any]:
             "status": "SUCCESS"
         }
     
-    # Capability questions
     elif any(word in query_lower for word in ['what can you do', 'capabilities', 'help', 'how to use']):
         return {
             "response": "I specialize in geospatial analysis! I can help you:\n• Find businesses, services, or landmarks in specific locations\n• Analyze spatial relationships and distances\n• Visualize geographic data\n• Perform location-based searches\n\nJust tell me what you're looking for and where you want to search. For example: 'Find coffee shops in Brooklyn' or 'Show me parks near the University of California'.",
@@ -279,7 +273,6 @@ def conversational_tool(user_query: str) -> Dict[str, Any]:
             "status": "SUCCESS"
         }
     
-    # Thanks responses
     elif any(word in query_lower for word in ['thank', 'thanks', 'appreciate']):
         return {
             "response": "You're welcome! I'm here whenever you need geospatial analysis or location-based information. Feel free to ask me about finding places, analyzing spatial data, or anything geography-related!",
@@ -287,7 +280,6 @@ def conversational_tool(user_query: str) -> Dict[str, Any]:
             "status": "SUCCESS"
         }
     
-    # Generic conversational fallback
     else:
         return {
             "response": "I'm a Geospatial AI Analyst specialized in location-based analysis. While I'd love to chat about other topics, I'm optimized for helping you find and analyze geographic information. Try asking me to find something in a specific location - I'm really good at that!",
@@ -301,18 +293,9 @@ def conversational_tool(user_query: str) -> Dict[str, Any]:
 # ================================
 
 def make_llm_call(prompt: str) -> Dict[str, Any]:
-    """
-    Makes a REAL call to the LLM service to get the Conductor's decision.
-    
-    Args:
-        prompt: The formatted system prompt for the Conductor.
-        
-    Returns:
-        Dictionary containing the LLM's tool choice decision.
-    """
+    """Makes a REAL call to the LLM service to get the Conductor's decision."""
     logger.info("Making a real LLM call for Conductor decision...")
     
-    # Get the Ollama URL from the environment variable we set in docker-compose.yml
     ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     if not ollama_url:
         logger.error("OLLAMA_BASE_URL is not set. Cannot connect to LLM.")
@@ -320,55 +303,38 @@ def make_llm_call(prompt: str) -> Dict[str, Any]:
 
     full_api_url = f"{ollama_url}/api/generate"
     
-    # This payload is specifically for the Ollama API
     payload = {
         "model": "mistral",
         "prompt": prompt,
-        "stream": False,  # We want the full JSON response at once
-        "format": "json"  # Critically important to ensure the output is valid JSON
+        "stream": False,
+        "format": "json"
     }
     
     try:
-        # Execute the HTTP POST request to the Ollama service
-        response = requests.post(full_api_url, json=payload, timeout=90) # 90-second timeout
-        response.raise_for_status() # Raise an error for bad responses (4xx or 5xx)
+        response = requests.post(full_api_url, json=payload, timeout=90)
+        response.raise_for_status()
         
-        # Parse the JSON response from Ollama and extract the content
         response_data = response.json()
         decision_json_str = response_data.get('response', '{}')
         
         logger.info(f"LLM decision received: {decision_json_str}")
-        
-        # Return the parsed dictionary from the LLM's response string
         return json.loads(decision_json_str)
 
     except requests.exceptions.RequestException as e:
         logger.error(f"LLM call failed: Could not connect to Ollama at {full_api_url}. Error: {e}", exc_info=True)
-        # Fallback to conversational tool if the LLM is unreachable
-        return {
-            "tool_to_use": "conversational_tool",
-            "input_for_tool": "hello" # A safe fallback
-        }
+        return {"tool_to_use": "conversational_tool", "input_for_tool": "hello"}
     except json.JSONDecodeError as e:
         logger.error(f"LLM returned invalid JSON. Response: {decision_json_str}", exc_info=True)
         raise ValueError("LLM failed to produce valid JSON for its decision.") from e
 
 
 def format_chat_history(chat_history: List[Dict[str, Any]]) -> str:
-    """
-    Formats chat history for inclusion in the system prompt
-    
-    Args:
-        chat_history: List of chat message dictionaries
-        
-    Returns:
-        Formatted string representation of chat history
-    """
+    """Formats chat history for inclusion in the system prompt."""
     if not chat_history:
         return "No previous conversation history."
     
     formatted_history = []
-    for msg in chat_history[-5:]:  # Keep only last 5 messages for context
+    for msg in chat_history[-5:]:
         role = msg.get('role', 'unknown')
         content = msg.get('content', '')
         formatted_history.append(f"{role.upper()}: {content}")
@@ -382,9 +348,7 @@ def format_chat_history(chat_history: List[Dict[str, Any]]) -> str:
 
 @celery.task(name="engine.execute_agentic_workflow", bind=True)
 def execute_agentic_workflow(self, task_input: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Main Conductor Agent task using a Special Command + RAG architecture.
-    """
+    """Main Conductor Agent task using a Special Command + RAG architecture."""
     job_id = self.request.id
     user_query = task_input.get('query', '').strip()
     chat_history = task_input.get('history', []) 
@@ -393,21 +357,18 @@ def execute_agentic_workflow(self, task_input: Dict[str, Any]) -> Dict[str, Any]
     self.update_state(state='PROGRESS', meta={'stage': 'Analyzing query...'})
 
     try:
-        # --- Step 1: Check for a hardcoded special command for 100% reliability ---
+        # Step 1: Check for a hardcoded special command for 100% reliability
         special_command = find_special_command(user_query)
         if special_command:
             pre_canned_query = special_command.get("pre-canned_query")
             logger.info(f"[Job: {job_id}] Matched special command. Executing pre-canned geospatial query.")
-            # Directly call the tool, bypassing the LLM completely.
             return geospatial_planning_and_execution_tool(pre_canned_query, job_id)
 
-        # --- Step 2: If no special command, perform Retrieve-Augment-Generate (RAG) cycle ---
-        # RETRIEVE context
+        # Step 2: If no special command, perform Retrieve-Augment-Generate (RAG) cycle
         logger.info(f"[Job: {job_id}] No special command. Starting RAG cycle.")
         knowledge_base = KnowledgeBase()
         system_context = knowledge_base.retrieve_context_for_query(user_query)
 
-        # AUGMENT prompt
         formatted_history = format_chat_history(chat_history)
         conductor_prompt = CONDUCTOR_SYSTEM_PROMPT.format(
             system_context=system_context,
@@ -415,24 +376,24 @@ def execute_agentic_workflow(self, task_input: Dict[str, Any]) -> Dict[str, Any]
             user_query=user_query
         )
 
-        # GENERATE decision
         llm_decision = make_llm_call(conductor_prompt)
         tool_to_use = llm_decision.get('tool_to_use')
         
         logger.info(f"[Job: {job_id}] RAG-informed LLM decision: use tool '{tool_to_use}'")
 
-        # --- Step 3: Execute the LLM-chosen tool ---
+        # Step 3: Execute the LLM-chosen tool
         if tool_to_use == "geospatial_tool":
             return geospatial_planning_and_execution_tool(user_query, job_id)
         elif tool_to_use == "result_qa_tool":
             return result_qa_tool(user_query, chat_history)
-        else: # Default to conversational_tool for safety
+        else:
             logger.info(f"[Job: {job_id}] Defaulting to conversational tool.")
             return conversational_tool(user_query)
 
     except Exception as e:
         logger.error(f"[Job: {job_id}] Conductor agent workflow FAILED: {e}", exc_info=True)
         self.update_state(state='FAILURE', meta={'exc_type': type(e).__name__, 'exc_message': str(e)})
+        # Re-raising allows Celery to properly mark the task as FAILED
         raise
 
 
@@ -447,15 +408,31 @@ def cleanup_old_jobs():
     This should be run periodically to prevent memory issues.
     """
     if not redis_client:
+        logger.warning("Cleanup task skipped: Redis client not available.")
         return {"status": "skipped", "reason": "Redis not available"}
     
     try:
         job_keys = redis_client.keys("job:*")
         cleaned_count = 0
         
+        # --- FIX: Only execute deletion if keys are found ---
+        if job_keys:
+            logger.info(f"Found {len(job_keys)} old job keys to clean up.")
+            # Use a pipeline for efficient bulk deletion
+            pipeline = redis_client.pipeline()
+            for key in job_keys:
+                pipeline.delete(key)
+            result = pipeline.execute()
+            # The result of a pipeline of DELETEs is a list of 1s (for success) and 0s.
+            # Summing them gives the total number of successfully deleted keys.
+            cleaned_count = sum(result)
+            logger.info(f"Successfully cleaned up {cleaned_count} job keys.")
+        else:
+            logger.info("No old job keys found to clean up.")
+
         return {
             "status": "completed",
-            "total_jobs": len(job_keys),
+            "total_jobs_found": len(job_keys),
             "cleaned_jobs": cleaned_count
         }
     except Exception as e:
