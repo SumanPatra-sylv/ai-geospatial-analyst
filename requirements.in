@@ -13,6 +13,7 @@ langchain-openai
 langgraph
 sentence-transformers
 faiss-cpu
+chromadb
 torch
 
 # --- Geospatial & Data ---
