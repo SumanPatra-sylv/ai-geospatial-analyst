@@ -18,11 +18,16 @@ try:
     from src.gis.data_loader import SmartDataLoader
     from src.core.planners.workflow_generator import WorkflowGenerator, ParsedQuery
     from src.core.planners.query_parser import SpatialConstraint, SpatialRelationship
+    from src.gis.tools.definitions import TOOL_REGISTRY 
+    # *** 1. ADDED THIS LINE (as requested by plan) ***
+    from src.core.agents.data_scout import DataScout
 except ImportError:
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
     from src.gis.data_loader import SmartDataLoader
     from src.core.planners.workflow_generator import WorkflowGenerator, ParsedQuery
     from src.core.planners.query_parser import SpatialConstraint, SpatialRelationship
+    from src.gis.tools.definitions import TOOL_REGISTRY 
+    from src.core.agents.data_scout import DataScout
 
 import geopandas as gpd
 import pandas as pd
@@ -83,7 +88,6 @@ class WorkflowExecutor:
         
         # Also print for immediate feedback
         print(f"    🧠 REASONING: {reasoning}")
-    # In src/core/executors/workflow_executor.py, inside the WorkflowExecutor class
 
     def _homogenize_geometries(self, gdf: gpd.GeoDataFrame, target_type: str = "Point") -> gpd.GeoDataFrame:
         """
@@ -108,11 +112,10 @@ class WorkflowExecutor:
             raise ValueError("Workflow plan cannot be empty.")
         
         # Initialize execution metadata
+        self.clear_layers()
+
         self.execution_metadata['start_time'] = datetime.now()
         self.execution_metadata['total_steps'] = len(workflow_plan)
-        
-        self.clear_layers()
-        self.reasoning_log.clear()
         
         print(f"🚀 Starting workflow execution with {len(workflow_plan)} steps")
         print(f"📍 Target location: '{parsed_query.location}'")
@@ -143,17 +146,19 @@ class WorkflowExecutor:
                 raise WorkflowExecutionError(f"Step {i} failed: {e}", i, step.get('operation'))
         
         # Finalize execution
-        final_layer_name = workflow_plan[-1]['output_layer']
+        last_step = workflow_plan[-1]
+        final_layer_name = last_step.get('parameters', {}).get('output_layer')
+        
+        if final_layer_name is None:
+           raise WorkflowExecutionError("Could not determine the final output layer name from the plan.")
         final_result = self.data_layers[final_layer_name]
 
-        # *** MINOR FIX: Moved this line down to only run on success ***
         self.execution_metadata['end_time'] = datetime.now()
         execution_time = (self.execution_metadata['end_time'] - self.execution_metadata['start_time']).total_seconds()
 
         print(f"\n🎉 Workflow completed successfully in {execution_time:.2f} seconds!")
         print(f"📊 Final result contains {len(final_result)} features.")
         
-        # Log final reasoning
         self.log_reasoning(len(workflow_plan) + 1, 'workflow_completion',
                           f"Workflow completed successfully. Final result contains {len(final_result)} features "
                           f"in layer '{final_layer_name}'. Total execution time: {execution_time:.2f} seconds.")
@@ -161,66 +166,74 @@ class WorkflowExecutor:
         return final_result
     
     def _validate_workflow_plan(self, workflow_plan: List[Dict[str, Any]]):
-        """Validate workflow plan structure and operations."""
+        """Validate workflow plan structure and operations against the official TOOL_REGISTRY."""
         for i, step in enumerate(workflow_plan, 1):
             operation = step.get('operation')
-            output_layer = step.get('output_layer')
+            
+            if not operation:
+                raise KeyError(f"Workflow plan is malformed. Step {i} is missing 'operation'.")
 
-            if not operation or not output_layer:
-                raise KeyError(f"Workflow plan is malformed. Step {i} is missing 'operation' or 'output_layer'.")
-
-            method_name = f"_op_{operation}"
-            if not hasattr(self, method_name):
+            # Check if the operation exists in our central source of truth.
+            if operation not in TOOL_REGISTRY:
                 raise ValueError(f"Workflow plan contains an unknown operation in Step {i}: '{operation}'.")
+            
+            # You could add more advanced parameter validation here in the future
+            # by comparing the step's parameters to the tool's definition.
     
     def _execute_single_step(self, step_number: int, step: Dict[str, Any], parsed_query: ParsedQuery):
-        """Execute a single workflow step with reasoning and metadata tracking."""
+        """
+        Execute a single workflow step by dynamically looking up the correct
+        executor method from the TOOL_REGISTRY.
+        """
         operation = step['operation']
-        output_layer = step['output_layer']
         
-        print(f"\n🔄 Step {step_number}: Executing '{operation}' -> '{output_layer}'")
+        # Use fallback to get the correct output layer name, supporting all definition variations
+        output_layer = step.get('parameters', {}).get('output_layer')
+
+        print(f"\n🔄 Step {step_number}: Executing '{operation}' -> '{output_layer or 'No output layer defined'}'")
         
-        # Add location context for OSM operations
-        if operation == 'load_osm_data':
-            step['location'] = parsed_query.location
+        if operation == 'load_osm_data' and 'area_name' not in step and 'location' not in step:
+            step['area_name'] = parsed_query.location
         
+        # 1. Look up the tool definition from the central registry.
+        tool_definition = TOOL_REGISTRY[operation]
+        # 2. Get the official executor method name from the definition.
+        method_name = tool_definition.executor_method_name
+        # 3. Get the actual method from the class instance.
+        operation_method = getattr(self, method_name)
+
         # Execute the operation
         start_time = time.time()
-        operation_method = getattr(self, f"_op_{operation}")
-        result_gdf = operation_method(step, step_number)
+        result_gdf = operation_method(step['parameters'], step_number)
         execution_time = time.time() - start_time
         
-        # Store result and update metadata
-        self.data_layers[output_layer] = result_gdf
-        self.execution_metadata['total_features_processed'] += len(result_gdf)
-        
-        if isinstance(result_gdf, gpd.GeoDataFrame):
+        # Store result and update metadata (only if an output layer is defined)
+        if output_layer:
+            self.data_layers[output_layer] = result_gdf
+            self.execution_metadata['total_features_processed'] += len(result_gdf)
             print(f"  ✅ Stored {len(result_gdf)} features in layer '{output_layer}' ({execution_time:.2f}s)")
         
         return result_gdf
     
-    # *** CORE FIX: This entire method is replaced to use the planner's tags ***
     def _op_load_osm_data(self, params: Dict[str, Any], step_number: int) -> gpd.GeoDataFrame:
-        location = params['location']
-        # The planner now generates a 'tags' dictionary in the plan. We must use it.
-        tags = params.get('tags') 
+        # Align with definitions.py (area_name) but keep fallback for older plans (location)
+        location = params.get('area_name') or params.get('location')
+        tags = params.get('tags', {}) 
         
+        if not location:
+            raise ValueError("Missing 'area_name' or 'location' parameter for load_osm_data.")
         if not tags:
-            # Fallback for old plans or simple loads without specific tags
-            tags = {'landuse': True} 
-            print(f"    ⚠️  No specific tags found in plan. Defaulting to loading all landuse for: {location}")
+            warnings.warn("No 'tags' provided for load_osm_data. This might result in a very large download or an error.")
 
         reasoning = f"Loading OSM data for location '{location}' with specific tags: {tags}. This provides the precise foundational data needed."
         print(f"    🏷️  Filtering by tags: {tags}")
         self.log_reasoning(step_number, 'load_osm_data', reasoning, input_info={'location': location, 'tags': tags})
         
         try:
-            # This will now call the powerful method in SmartDataLoader that accepts tags.
-            # This fixes the "AttributeError: 'SmartDataLoader' object has no attribute 'fetch_osm_data'"
             result = self.smart_data_loader.fetch_osm_data(location, tags)
             
             if result.empty:
-                warnings.warn(f"Warning: No features found for tags {tags} in location '{location}'. The workflow will continue with an empty dataset for this step.")
+                warnings.warn(f"Warning: No features found for tags {tags} in location '{location}'.")
 
             self.log_reasoning(step_number, 'load_osm_data', 
                             f"Successfully retrieved {len(result)} features from OSM.",
@@ -272,10 +285,13 @@ class WorkflowExecutor:
     
     def _op_buffer(self, params: Dict[str, Any], step_number: int) -> gpd.GeoDataFrame:
         """Enhanced buffering with reasoning and CRS handling."""
-        gdf = self.data_layers[params['input_layer']]
-        distance = params['distance_meters']
+        # *** 3. MODIFIED THIS BLOCK (as requested by plan) ***
+        # Use fallback to support both old and new parameter names
+        input_layer = params.get('layer_name') or params.get('input_layer')
+        distance = params.get('distance') or params.get('distance_meters')
+        gdf = self.data_layers[input_layer]
         
-        reasoning = f"Creating {distance}m buffer around {len(gdf)} features from layer '{params['input_layer']}'. "
+        reasoning = f"Creating {distance}m buffer around {len(gdf)} features from layer '{input_layer}'. "
         reasoning += "Buffering will expand the spatial extent of features to capture nearby areas. "
         
         print(f"    🔄 Buffering {len(gdf)} features by {distance} meters")
@@ -283,7 +299,7 @@ class WorkflowExecutor:
         if gdf.empty:
             reasoning += "Input layer is empty, returning empty buffer result."
             self.log_reasoning(step_number, 'buffer', reasoning,
-                              input_info={'layer': params['input_layer'], 'distance': distance, 'input_count': 0},
+                              input_info={'layer': input_layer, 'distance': distance, 'input_count': 0},
                               output_info={'feature_count': 0})
             return gdf.copy()
 
@@ -307,36 +323,34 @@ class WorkflowExecutor:
             result = projected_gdf
         
         self.log_reasoning(step_number, 'buffer', reasoning,
-                          input_info={'layer': params['input_layer'], 'distance': distance, 'input_count': len(gdf), 'original_crs': str(original_crs)},
+                          input_info={'layer': input_layer, 'distance': distance, 'input_count': len(gdf), 'original_crs': str(original_crs)},
                           output_info={'feature_count': len(result)})
         
         return result
     
-    # In src/core/executors/workflow_executor.py
-
     def _op_clip(self, params: Dict[str, Any], step_number: int) -> gpd.GeoDataFrame:
         """Enhanced clipping with reasoning and CRS validation."""
-        input_gdf = self.data_layers[params['input_layer']]
-        clip_gdf = self.data_layers[params['clip_layer']]
+        # *** 3. MODIFIED THIS BLOCK (as requested by plan) ***
+        input_layer = params.get('input_layer_name') or params.get('input_layer')
+        clip_layer = params.get('clip_layer_name') or params.get('clip_layer')
+        input_gdf = self.data_layers[input_layer]
+        clip_gdf = self.data_layers[clip_layer]
         
-        reasoning = f"Clipping features from '{params['input_layer']}' ({len(input_gdf)} features) "
-        reasoning += f"using boundaries from '{params['clip_layer']}' ({len(clip_gdf)} features). "
+        reasoning = f"Clipping features from '{input_layer}' ({len(input_gdf)} features) "
+        reasoning += f"using boundaries from '{clip_layer}' ({len(clip_gdf)} features). "
         reasoning += "This will extract only the portions of input features that fall within the clip boundaries."
         
-        print(f"    ✂️  Clipping '{params['input_layer']}' ({len(input_gdf)}) with '{params['clip_layer']}' ({len(clip_gdf)})")
+        print(f"    ✂️  Clipping '{input_layer}' ({len(input_gdf)}) with '{clip_layer}' ({len(clip_gdf)})")
 
         if input_gdf.empty or clip_gdf.empty:
             reasoning += " One or both layers are empty, returning empty result."
             self.log_reasoning(step_number, 'clip', reasoning,
-                              input_info={'input_layer': params['input_layer'], 'clip_layer': params['clip_layer'], 
+                              input_info={'input_layer': input_layer, 'clip_layer': clip_layer, 
                                         'input_count': len(input_gdf), 'clip_count': len(clip_gdf)},
                               output_info={'feature_count': 0})
             return gpd.GeoDataFrame(columns=input_gdf.columns, geometry=[], crs=input_gdf.crs)
         
-        # *** THIS IS THE FIX ***
-        # Homogenize geometries to prevent mixed-type errors before overlay.
         input_gdf = self._homogenize_geometries(input_gdf)
-        # We don't need to homogenize the clip_gdf, as it's always polygons (from buffer).
 
         # Handle CRS mismatch
         if input_gdf.crs != clip_gdf.crs:
@@ -349,7 +363,7 @@ class WorkflowExecutor:
         reasoning += f" Clipping operation resulted in {len(result)} features."
         
         self.log_reasoning(step_number, 'clip', reasoning,
-                          input_info={'input_layer': params['input_layer'], 'clip_layer': params['clip_layer'], 
+                          input_info={'input_layer': input_layer, 'clip_layer': clip_layer, 
                                     'input_count': len(input_gdf), 'clip_count': len(clip_gdf)},
                           output_info={'feature_count': len(result)})
         
@@ -429,15 +443,19 @@ class WorkflowExecutor:
     
     def _op_rename_layer(self, params: Dict[str, Any], step_number: int) -> gpd.GeoDataFrame:
         """Enhanced layer renaming with reasoning."""
-        reasoning = f"Finalizing workflow by renaming layer '{params['input_layer']}' to '{params['output_layer']}'. "
+        # *** 3. MODIFIED THIS BLOCK (as requested by plan) ***
+        old_name = params.get('old_name') or params.get('input_layer')
+        new_name = params.get('new_name') or params.get('output_layer')
+        
+        reasoning = f"Finalizing workflow by renaming layer '{old_name}' to '{new_name}'. "
         reasoning += "This prepares the final result for output and subsequent use."
         
-        print(f"    📝 Finalizing result from layer '{params['input_layer']}' to '{params['output_layer']}'")
+        print(f"    📝 Finalizing result from layer '{old_name}' to '{new_name}'")
         
-        result = self.data_layers[params['input_layer']].copy()
+        result = self.data_layers[old_name].copy()
         
         self.log_reasoning(step_number, 'rename_layer', reasoning,
-                          input_info={'input_layer': params['input_layer'], 'output_layer': params['output_layer']},
+                          input_info={'input_layer': old_name, 'output_layer': new_name},
                           output_info={'feature_count': len(result)})
         
         return result
@@ -513,62 +531,109 @@ class WorkflowExecutor:
             'errors': []
         }
 
-if __name__ == '__main__':
-    # Enhanced integration test
-    print("🧪 === WorkflowExecutor Integration Test ===")
+    def _op_spatial_join(self, params: Dict[str, Any], step_number: int) -> gpd.GeoDataFrame:
+        """
+        Performs a spatial join, transferring attributes from one layer to another.
+        Aligned with the official ToolDefinition.
+        """
+        # Align with definitions.py
+        left_layer_name = params.get('left_layer_name') or params.get('left_layer')
+        right_layer_name = params.get('right_layer_name') or params.get('right_layer')
+        how = params.get('how', 'inner')
+        predicate = params.get('predicate', 'intersects')
+        
+        left_gdf = self.data_layers[left_layer_name]
+        right_gdf = self.data_layers[right_layer_name]
+
+        reasoning = (f"Spatially joining '{left_layer_name}' ({len(left_gdf)} features) with "
+                     f"'{right_layer_name}' ({len(right_gdf)} features) using a '{how}' join and '{predicate}' predicate.")
+        print(f"    🔗 Spatially joining '{left_layer_name}' with '{right_layer_name}'")
+        self.log_reasoning(step_number, 'spatial_join', reasoning)
+
+        if left_gdf.empty or right_gdf.empty:
+            warnings.warn("One or both layers for spatial join are empty. Returning an empty result.")
+            return gpd.GeoDataFrame()
+
+        if left_gdf.crs != right_gdf.crs:
+            right_gdf = right_gdf.to_crs(left_gdf.crs)
+            
+        result = gpd.sjoin(left_gdf, right_gdf, how=how, predicate=predicate)
+
+        self.log_reasoning(step_number, 'spatial_join', f"Join resulted in {len(result)} features.")
+        return result
     
-    # A test case that forces the use of multiple tools
+    # *** 2. ADDED THIS COMPLETE METHOD (as requested by plan) ***
+    def _op_summarize(self, params: Dict[str, Any], step_number: int) -> gpd.GeoDataFrame:
+        """
+        Summarizes a GeoDataFrame by selecting a subset of columns.
+        """
+        # Use fallback to support older plan formats if needed
+        input_layer = params.get('input_layer_name') or params.get('input_layer')
+        summary_fields = params.get('summary_fields', [])
+
+        gdf = self.data_layers[input_layer]
+
+        print(f"    📊 Summarizing layer '{input_layer}' to include fields: {summary_fields}")
+        self.log_reasoning(step_number, 'summarize', f"Summarizing layer '{input_layer}' to include fields: {summary_fields}.")
+
+        if gdf.empty:
+            warnings.warn(f"Input layer '{input_layer}' is empty. Summarize will produce an empty result.")
+            # Return an empty GeoDataFrame with the correct columns if possible
+            return gpd.GeoDataFrame(columns=[f for f in summary_fields if f != 'geometry'], geometry=[], crs=gdf.crs)
+
+        # Always include the geometry column for spatial context
+        if 'geometry' not in summary_fields:
+            summary_fields.append('geometry')
+            
+        # Filter for columns that actually exist in the GeoDataFrame to prevent errors
+        existing_fields = [field for field in summary_fields if field in gdf.columns]
+        
+        if len(existing_fields) < len(summary_fields):
+            missing = set(summary_fields) - set(existing_fields)
+            warnings.warn(f"Fields not found during summary and will be ignored: {missing}")
+
+        return gdf[existing_fields].copy()
+
+# *** 4. REPLACED THE ENTIRE TEST BLOCK (as requested by plan) ***
+if __name__ == '__main__':
+    print("🧪 === WorkflowExecutor Integration Test (New Architecture) ===")
+    
     test_query = ParsedQuery(
         target='school',
         location='Potsdam, Germany',
         constraints=[
-            SpatialConstraint(
-                feature_type='park', 
-                relationship=SpatialRelationship.NEAR, 
-                distance_meters=500
-            )
+            SpatialConstraint(feature_type='park', relationship=SpatialRelationship.NEAR, distance_meters=500)
         ],
-        summary_required=True
+        summary_required=True 
     )
-    
-    rag_guidance = "To find a target 'near' a constraint, a good strategy is to: 1. Load the target features. 2. Load the constraint features. 3. Create a buffer around the constraint features. 4. Find the target features that are within the buffer zone using a spatial join or intersection."
-
     print(f"\n🎯 Testing query: Find '{test_query.target}' near a '{test_query.constraints[0].feature_type}' in '{test_query.location}'")
     
     try:
-        # PHASE 1: Generate the plan
-        print("\n[PHASE 1] Generating workflow plan...")
-        generator = WorkflowGenerator()
-        generation_result = generator.generate_workflow(test_query, rag_guidance)
+        print("\n[PHASE 1] Initializing agents and generating workflow plan...")
+        data_scout_agent = DataScout()
+        generator = WorkflowGenerator(data_scout=data_scout_agent)
+        generation_result = generator.generate_workflow(parsed_query=test_query)
         plan = generation_result.get("plan", [])
         
         print("\n--- Generated Plan ---")
         pprint(plan)
         
-        # Check if the generated plan is logical
-        if not plan or len(plan) < 4:
-             print("\n❌ VALIDATION FAILED: The generated plan is too simple. It likely didn't use the advanced tools.")
+        if not plan:
+             reason = generation_result.get("reasoning", "No reason provided.")
+             print(f"\n❌ EXECUTION HALTED: The planner could not generate a valid plan. Reason: {reason}")
              exit()
         
-        # PHASE 2: Execute the plan
         print("\n[PHASE 2] Executing generated workflow plan...")
-        executor = WorkflowExecutor(enable_reasoning_log=True)
+        executor = WorkflowExecutor() # You can keep your enable_reasoning_log=True here
+        executor._validate_workflow_plan(plan)
+        print("✅ Plan validation successful.")
         final_result = executor.execute_workflow(plan, test_query)
         
         print("\n📊 === FINAL RESULT ===")
         print(f"Result contains {len(final_result)} features.")
-        
         if not final_result.empty:
             print("\n📋 Data Summary:")
             final_result.info()
-        
-        # Display execution summary
-        print("\n⏱️  === EXECUTION SUMMARY ===")
-        summary = executor.get_execution_summary()
-        pprint(summary)
-        
-        # Export reasoning log
-        log_file = executor.export_reasoning_log()
         
         print(f"\n✅ Integration Test SUCCESSFUL!")
         
