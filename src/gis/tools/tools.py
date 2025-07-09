@@ -6,7 +6,7 @@ import geopandas as gpd
 from langchain_core.tools import tool
 
 # Import all schemas from the schemas file
-from .schemas import (
+from src.core.schemas import (
     ListAvailableDataSchema,
     LoadVectorDataSchema,
     SaveVectorDataSchema,

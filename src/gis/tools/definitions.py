@@ -445,6 +445,37 @@ INTERSECT_ANALYSIS = ToolDefinition(
     outputs=["Intersection features as GeoDataFrame", "New intersection layer"]
 )
 
+# *** ACTION 1: ADDED THE SUMMARIZE_DATA DEFINITION ***
+SUMMARIZE_DATA = ToolDefinition(
+    operation_name="summarize",
+    description="Summarizes a layer by selecting specific columns and providing basic statistics.",
+    parameters=[
+        ToolParameter(
+            name="input_layer",
+            description="The name of the layer to summarize.",
+            type=ParameterType.STRING,
+            required=True
+        ),
+        ToolParameter(
+            name="summary_fields",
+            description="A list of columns to include in the summary.",
+            type=ParameterType.LIST,
+            required=False,
+            default=[]
+        ),
+        ToolParameter(
+            name="output_layer_name",
+            description="Name for the summarized output layer.",
+            type=ParameterType.STRING,
+            required=True
+        )
+    ],
+    executor_method_name="_op_summarize",
+    category="analysis",
+    examples=["Summarize the final results to show only the 'name' and 'address'"],
+    outputs=["A GeoDataFrame with a subset of columns."]
+)
+
 # Data Management Tools
 RENAME_LAYER = ToolDefinition(
     operation_name="rename_layer",
@@ -617,6 +648,8 @@ TOOL_REGISTRY: Dict[str, ToolDefinition] = {
     # Analysis Tools
     "calculate_area": CALCULATE_AREA,
     "calculate_distance": CALCULATE_DISTANCE,
+    # *** ACTION 2: ADDED THE NEW TOOL TO THE REGISTRY ***
+    "summarize": SUMMARIZE_DATA
 }
 
 # =============================================================================
