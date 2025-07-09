@@ -70,6 +70,9 @@ benchmark_results/
 *.onnx
 model/
 models/
+# Ignore old or temporary files
+old_files/
+democode.py
 
 # NOTE: The 'data/boundaries' directory containing sample shapefiles
 # is intentionally NOT listed here, so that Git WILL track it. This

@@ -40,3 +40,7 @@ python-dotenv
 setuptools>=69.0.0
 numpy==1.25.2
 scipy>=1.11
+# --- NEW DEPENDENCIES FOR ADVANCED AGENTS ---
+aiohttp         # For asynchronous HTTP requests used by the DataScout's prober
+inflect         # For reliable pluralization in the KnowledgeBase (a good practice)
+spacy           # For advanced Natural Language Processing (NLP) capabilities
