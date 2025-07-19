@@ -65,7 +65,7 @@ def health_check():
     # If jobs router is loaded, get detailed health info
     if JOBS_ROUTER_LOADED:
         try:
-            from src.api.routes.jobs import redis_client, REDIS_AVAILABLE, get_celery_task
+            from api.routes.jobs import redis_client, REDIS_AVAILABLE, get_celery_task
             
             # Check Redis
             health_status["redis"] = "healthy" if REDIS_AVAILABLE else "unavailable"
@@ -105,7 +105,7 @@ def metrics():
         # Redis status if available
         if JOBS_ROUTER_LOADED:
             try:
-                from src.api.routes.jobs import redis_client, REDIS_AVAILABLE
+                from api.routes.jobs import redis_client, REDIS_AVAILABLE
                 redis_status = 1 if REDIS_AVAILABLE else 0
                 if REDIS_AVAILABLE:
                     try:
@@ -167,7 +167,7 @@ async def shutdown_event():
     # Close Redis connection if available
     if JOBS_ROUTER_LOADED:
         try:
-            from src.api.routes.jobs import redis_client, REDIS_AVAILABLE
+            from api.routes.jobs import redis_client, REDIS_AVAILABLE
             if REDIS_AVAILABLE and redis_client:
                 redis_client.close()
                 print("📪 Redis connection closed")

@@ -26,8 +26,8 @@ celery.conf.update(
     
     # Task routing and execution
     task_routes={
-        'src.worker.tasks.run_geospatial_task': {'queue': 'geospatial'},
-        'src.worker.tasks.cleanup_old_jobs': {'queue': 'maintenance'},
+        'worker.tasks.run_geospatial_task': {'queue': 'geospatial'},
+        'worker.tasks.cleanup_old_jobs': {'queue': 'maintenance'},
     },
     
     # Worker settings
