@@ -151,7 +151,7 @@ class JobStatusResponse(BaseModel):
 # --- Utility Functions ---
 def get_celery_app():
     try:
-        from src.worker.celery_app import celery as celery_app
+        from worker.celery_app import celery as celery_app
         return celery_app
     except ImportError as e:
         logger.error(f"Could not import Celery app: {e}")
@@ -160,7 +160,7 @@ def get_celery_app():
 # --- FIX: Using the new 'execute_agentic_workflow' task name ---
 def get_celery_task():
     try:
-        from src.worker.tasks import execute_agentic_workflow
+        from worker.tasks import execute_agentic_workflow
         return execute_agentic_workflow
     except ImportError as e:
         logger.error(f"Could not import Celery task: {e}")

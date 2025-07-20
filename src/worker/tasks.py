@@ -17,7 +17,7 @@ from worker.celery_app import celery
 from core.executors.workflow_executor import WorkflowExecutor, LocationNotFoundError
 from core.planners.workflow_generator import WorkflowGenerator
 from core.planners.query_parser import QueryParser, QueryParserError
-from core.knowledge_base import KnowledgeBase # For the Conductor Agent
+from core.knowledge.knowledge_base import KnowledgeBase # For the Conductor Agent
 # Import the new Knowledge Base for the Geospatial Tool
 from rag.geospatial_knowledge import GeospatialKnowledgeBase
 
