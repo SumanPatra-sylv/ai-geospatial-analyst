@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-AI-GIS Workflow Generator (Iterative Version with RAG)
+AI-GIS Workflow Generator (Iterative Version with RAG and Layer Intelligence)
 Generates single-step spatial analysis decisions by using "Think-Act-Observe" loop,
-enhanced with RAG retrieval capabilities for learning from past successful patterns.
+enhanced with RAG retrieval capabilities and full layer visibility for smarter decisions.
 """
 
 import json
@@ -18,64 +18,103 @@ from src.core.agents.schemas import ClarificationAsk
 from src.gis.tools.definitions import TOOL_REGISTRY
 from src.core.planners.query_parser import ParsedQuery
 
+
 class ToolCallIntent(BaseModel):
     """Represents the LLM's intent to use a specific tool."""
     tool_name: str = Field(..., description="The exact name of the tool from the AVAILABLE TOOLS list.")
     parameters: Dict[str, Any] = Field(..., description="A dictionary of conceptual parameters for the tool.")
 
+
 class WorkflowGenerator:
     """
     Generates single-step spatial operation decisions using "Think-Act-Observe" pattern.
-    Enhanced with RAG retrieval for learning from past successful action patterns.
+    Enhanced with RAG retrieval and full layer intelligence visibility for optimal decision-making.
     """
 
-    ITERATIVE_SYSTEM_PROMPT = """You are a master GIS Strategist working step-by-step to solve a user's spatial query. You analyze the history of actions and their results to decide the single next best action.
+    # ✅ UPGRADED SYSTEM PROMPT - Now uses layer_intelligence for perfect column awareness
+    # src/core/planners/workflow_generator.py
+    ITERATIVE_SYSTEM_PROMPT = """
+    You are a master GIS Strategist.  Your job is to solve the user's spatial query
+    by emitting ONE tool call per turn.
 
-**YOUR MISSION:** Analyze the current situation and decide ONE tool to use next.
+    ────────────────────────────────────────────────────────
+    1. MISSION GOAL (the full request)
+    {{ original_query }}
 
-**RULES:**
-1. **SINGLE ACTION ONLY:** Your response must be exactly ONE JSON object with "tool_name" and "parameters"
-2. **ANALYZE LAST OBSERVATION:** Look at the most recent "Observation:" to understand current state
-3. **USE FINISH_TASK:** When the user's question is fully answered, call "finish_task"
-4. **LAYER REFERENCES:** Use exact layer names from observations (like "schools_layer_1")
-5. **CONCEPTUAL NAMING:** For new layers, use descriptive "conceptual_name" parameter
+    2. SUCCESS CRITERIA  – ALL must be true before you may call `finish_task`
+    • Every thematic entity mentioned in the mission goal
+    (e.g. “schools”, “parks”, “roads”) exists as a populated layer.
+    • Every spatial / attribute relationship requested in the goal
+    (e.g. “near”, “within 500 m”, “intersect”) has been computed.
+    • A final layer exists that directly answers the user’s question.
 
-**AVAILABLE TOOLS:**
-{{ tool_documentation }}
-- `finish_task(final_layer_name: str)`: Call this when the final answer is ready
+    3. STRATEGIC CHECKLIST  – Perform internally each turn
+    a. Extract the list of thematic entities from the MISSION GOAL.  
+    b. For each entity, check DATA LAYER DETAILS.  
+    • If a populated layer is missing → next action MUST be `load_osm_data`
+        (or another loader) to obtain it.  
+    c. If all entities are present, ask: “Has the required spatial /
+    attribute relationship been built?”  
+    • If not, choose the tool that creates the largest chunk of the
+        missing logic (buffer, spatial_join, distance_filter, etc.).  
+    d. If SUCCESS CRITERIA are all satisfied, call `finish_task`.
 
-**CURRENT MISSION CONTEXT:**
-Original Query: {{ original_query }}
-{% if rag_guidance %}
-**GUIDANCE FROM PAST SUCCESS:**
-{{ rag_guidance }}
-{% endif %}
+    4. OPERATION RULES
+    • Use the EXACT column names shown in DATA LAYER DETAILS.  
+    • Operate only on layers whose status is “populated”.  
+    • Return exactly ONE JSON object: {"tool_name": ..., "parameters": ...}.  
+    • Never output your chain of thought.  
+    • `finish_task(final_layer_name: str)` is the last step.
 
-**MISSION HISTORY:**
-{{ history }}
+    ────────────────────────────────────────────────────────
+    DATA LAYER DETAILS (YOUR WORKSPACE):
+    {% if layer_intelligence %}
+    {% for layer_name, details in layer_intelligence.items() %}
+    - **{{ layer_name }}** (status: {{ details.status }})
+    • Features: {{ details.feature_count }}
+    • Columns: {{ details.columns | join(', ') }}
+    • Geometry: {{ details.geometry_types | join(', ') }}
+    • CRS: {{ details.crs }}{% endfor %}
+    {% else %}
+    No data layers exist yet.  Your first action must be `load_osm_data`.
+    {% endif %}
+    ────────────────────────────────────────────────────────
+    AVAILABLE TOOLS:
+    {{ tool_documentation }}
+    • finish_task(final_layer_name: str)
 
----
-**EXAMPLES OF VALID RESPONSES:**
+    MISSION HISTORY:
+    {{ history }}
+    **DECISION EXAMPLES:**
+{"tool_name": "load_osm_data", "parameters": {"area_name": "Berlin, Germany", "tags": {"amenity": "school"}, "conceptual_name": "schools"}}
 
-```
-{"tool_name": "load_osm_data", "parameters": {"area_name": "Berlin, Germany", "tags": {"amenity": "school"}, "conceptual_name": "all_schools"}}
-```
 
-```
-{"tool_name": "buffer", "parameters": {"layer_name": "parks_layer_1", "distance": 500, "conceptual_name": "park_buffers"}}
-```
+{"tool_name": "filter_by_attribute", "parameters": {"layer_name": "schools_1", "key": "name", "value": "Elementary"}}
 
-```
-{"tool_name": "finish_task", "parameters": {"final_layer_name": "schools_near_parks_layer_3"}}
-```
 
-**TASK:** Based on the mission history, decide the single next action. Output ONE JSON tool call.
-"""
+{"tool_name": "finish_task", "parameters": {"final_layer_name": "filtered_schools_2"}}
+EXAMPLE OUTPUT
+{"tool_name": "load_osm_data",
+ "parameters": {"area_name": "Berlin, Germany",
+                "tags": {"amenity": "school"},
+                "conceptual_name": "schools"}}
 
-    # Parameter alias mapping - centralized for easy maintenance
+    ────────────────────────────────────────────────────────
+    TASK → Decide the SINGLE next tool call that best advances the
+    MISSION GOAL according to the STRATEGIC CHECKLIST, and output it as JSON.
+    """
+
+
+    # ✅ ENHANCED PARAMETER MAPPINGS - More comprehensive coverage
     PARAMETER_ALIASES = {
-        "input_layer": "layer_name",
-        "distance_meters": "distance", 
+        "layer_name": "input_layer",
+        "attribute": "key", 
+        "column": "key",
+        "field": "key",
+        "input_layer": "layer_name",  # Bidirectional mapping
+        "distance_meters": "distance",
+        "buffer_distance": "distance",
+        "radius": "distance",
         "left_layer": "left_layer_name",
         "right_layer": "right_layer_name",
         "clip_layer": "clip_layer_name",
@@ -93,7 +132,10 @@ Original Query: {{ original_query }}
         "overlay_layer": "overlay_layer_name",
         "union_layer": "union_layer_name",
         "intersect_layer": "intersect_layer_name",
-        "difference_layer": "difference_layer_name"
+        "difference_layer": "difference_layer_name",
+        "filter_value": "value",
+        "search_value": "value",
+        "attribute_value": "value"
     }
 
     # Layer reference parameters - these should be resolved to actual layer names
@@ -187,50 +229,92 @@ Original Query: {{ original_query }}
                 "rag_guidance": rag_guidance
             }
 
-    def get_next_action(self, history: List[str], original_query: str = "", rag_guidance: str = "") -> ToolCallIntent:
+    # ✅ FIXED: Added layer_intelligence parameter
+    def get_next_action(self, history: List[str], original_query: str = "", 
+                       rag_guidance: str = "", available_layers: List[str] = None,
+                       layer_intelligence: Dict[str, Any] = None) -> ToolCallIntent:
         """
-        Decide the single next best action based on conversation history.
+        Decide the single next best action with full context and layer intelligence.
         
         Args:
             history: List of previous thoughts, actions, and observations
             original_query: The original user query for context
             rag_guidance: Guidance from similar past workflows
+            available_layers: List of currently available layer names
+            layer_intelligence: Full layer details including columns, geometry, etc.
             
         Returns:
             Single ToolCallIntent for the next step
         """
         print("✍️  Strategist: Analyzing history and deciding next action...")
+        print(f"🔍 Layer Intelligence Available: {bool(layer_intelligence)}")
         
         try:
-            prompt = self._build_iterative_prompt(history, original_query, rag_guidance)
+            # ✅ FIXED: Pass layer_intelligence to prompt builder
+            prompt = self._build_iterative_prompt(
+                history, original_query, rag_guidance, available_layers, layer_intelligence
+            )
             llm_response = self._make_llm_call(prompt)
             
-            # Parse single tool call
             if "tool_name" in llm_response and "parameters" in llm_response:
                 tool_call_data = llm_response
             else:
-                # If response is wrapped, try to extract
                 tool_call_data = llm_response.get("tool_call", llm_response)
             
-            # Validate the response structure
             if not isinstance(tool_call_data, dict) or "tool_name" not in tool_call_data:
                 raise ValueError("Invalid tool call format from LLM")
             
             tool_call = ToolCallIntent(**tool_call_data)
             
-            # Validate tool exists (unless it's finish_task)
-            if tool_call.tool_name != "finish_task" and tool_call.tool_name not in TOOL_REGISTRY:
-                raise ValueError(f"Non-existent tool proposed: '{tool_call.tool_name}'")
+            # Enhanced validation with layer intelligence
+            self._validate_tool_call_with_intelligence(tool_call, layer_intelligence)
             
             return tool_call
             
         except Exception as e:
-            print(f"❌ Error in get_next_action: {e}")
-            # Return finish_task with error if something goes wrong
+            print(f"❌ CRITICAL ERROR in 'Think' phase: {e}")
+            import traceback
+            traceback.print_exc()
             return ToolCallIntent(
                 tool_name="finish_task",
-                parameters={"reason": f"Error occurred: {e}"}
+                parameters={"reason": f"Critical error during LLM call: {e}"}
             )
+
+    # ✅ FIXED: Added layer_intelligence parameter
+    def _build_iterative_prompt(self, history: List[str], original_query: str = "", 
+                               rag_guidance: str = "", available_layers: List[str] = None,
+                               layer_intelligence: Dict[str, Any] = None) -> str:
+        """
+        Build comprehensive prompt with all context including layer intelligence.
+        
+        Args:
+            history: List of conversation history entries
+            original_query: The original user query
+            rag_guidance: Guidance from similar past workflows
+            available_layers: List of currently available layer names
+            layer_intelligence: Full layer details for smart decision making
+            
+        Returns:
+            Formatted prompt for the LLM
+        """
+        tool_docs = self._generate_tool_documentation_string()
+        history_text = "\n".join(history) if history else "Mission just started."
+        
+        template = jinja2.Environment(
+            loader=jinja2.BaseLoader(), 
+            trim_blocks=True, 
+            lstrip_blocks=True
+        ).from_string(self.ITERATIVE_SYSTEM_PROMPT)
+        
+        # ✅ FIXED: Pass layer_intelligence to template
+        return template.render(
+            tool_documentation=tool_docs,
+            history=history_text,
+            original_query=original_query,
+            rag_guidance=rag_guidance,
+            available_layers=available_layers or [],
+            layer_intelligence=layer_intelligence or {}
+        )
 
     def translate_single_action(self, tool_call: ToolCallIntent, available_layers: Dict[str, str]) -> Dict[str, Any]:
         """
@@ -261,24 +345,65 @@ Original Query: {{ original_query }}
             "parameters": params
         }
 
-    def store_successful_pattern(self, original_query: str, action_sequence: List[Dict[str, Any]]) -> None:
+    def store_successful_pattern(self, original_query: str, action_sequence: list[Dict[str, Any]], execution_time: float = 0.0) -> None:
         """
         Store a successful action sequence pattern for future RAG retrieval.
-        
+
         Args:
             original_query: The original user query
-            action_sequence: List of successful actions taken
+            action_sequence: list of successful actions taken
+            execution_time: Total time taken for the successful workflow
         """
         if action_sequence:
             print("💾 Knowledge Base: Storing successful action pattern...")
+            
+            # ✅ FIX: Call the knowledge base with the correct 'execution_time' argument
             self.knowledge_base.store_successful_workflow(
                 original_query=original_query,
                 workflow_plan=action_sequence,
-                success_metrics={
-                    "action_count": len(action_sequence),
-                    "pattern_type": "iterative_success"
-                }
+                execution_time=execution_time
             )
+
+    # ✅ NEW: Enhanced validation using layer intelligence
+    def _validate_tool_call_with_intelligence(self, tool_call: ToolCallIntent, layer_intelligence: Dict[str, Any] = None) -> None:
+        """
+        Validate tool call using layer intelligence for smarter error detection.
+        
+        Args:
+            tool_call: The tool call to validate
+            layer_intelligence: Full layer details for validation
+        """
+        if tool_call.tool_name == "finish_task" or not layer_intelligence:
+            # Basic validation only
+            if tool_call.tool_name != "finish_task" and tool_call.tool_name not in TOOL_REGISTRY:
+                raise ValueError(f"Non-existent tool proposed: '{tool_call.tool_name}'")
+            return
+        
+        # Advanced validation with layer intelligence
+        params = tool_call.parameters
+        
+        # Check if referenced layers exist and have correct status
+        for param_name, param_value in params.items():
+            if param_name in self.LAYER_REFERENCE_PARAMS:
+                if param_value not in layer_intelligence:
+                    raise ValueError(f"Referenced layer '{param_value}' does not exist")
+                
+                layer_info = layer_intelligence[param_value]
+                if layer_info.get('status') != 'populated':
+                    raise ValueError(f"Cannot use layer '{param_value}' with status '{layer_info.get('status')}'")
+        
+        # Validate column references for filtering operations
+        if tool_call.tool_name in ["filter_by_attribute", "sort_by_attribute"] and "layer_name" in params and "key" in params:
+            layer_name = params["layer_name"]
+            column_name = params["key"]
+            
+            if layer_name in layer_intelligence:
+                available_columns = layer_intelligence[layer_name].get('columns', [])
+                if column_name not in available_columns:
+                    raise ValueError(
+                        f"Column '{column_name}' not found in layer '{layer_name}'. "
+                        f"Available columns: {', '.join(available_columns)}"
+                    )
 
     def _get_rag_guidance(self, query_context: str) -> str:
         """
@@ -309,34 +434,6 @@ Original Query: {{ original_query }}
             print("ℹ️  No similar workflows found in knowledge base.")
             return ""
 
-    def _build_iterative_prompt(self, history: List[str], original_query: str = "", rag_guidance: str = "") -> str:
-        """
-        Build prompt with RAG context for single-step decision.
-        
-        Args:
-            history: List of conversation history entries
-            original_query: The original user query
-            rag_guidance: Guidance from similar past workflows
-            
-        Returns:
-            Formatted prompt for the LLM
-        """
-        tool_docs = self._generate_tool_documentation_string()
-        history_text = "\n".join(history) if history else "Mission just started."
-        
-        template = jinja2.Environment(
-            loader=jinja2.BaseLoader(), 
-            trim_blocks=True, 
-            lstrip_blocks=True
-        ).from_string(self.ITERATIVE_SYSTEM_PROMPT)
-        
-        return template.render(
-            tool_documentation=tool_docs,
-            history=history_text,
-            original_query=original_query,
-            rag_guidance=rag_guidance
-        )
-
     def _format_initial_observation(self, report: DataRealityReport) -> str:
         """
         Format the initial data reality report as an observation.
@@ -365,6 +462,7 @@ Original Query: {{ original_query }}
     def _translate_parameter_aliases(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """
         Translates common LLM parameter names to the system's canonical names.
+        Enhanced with bidirectional mapping support.
         """
         translated_params = {}
         
@@ -373,7 +471,16 @@ Original Query: {{ original_query }}
                 translated_params[key] = value
                 continue
                 
+            # Check for direct mapping first, then reverse mapping
             canonical_key = self.PARAMETER_ALIASES.get(key, key)
+            
+            # If no direct mapping found, check if it's already a canonical name
+            if canonical_key == key:
+                # Check if this key is a target of any alias (reverse lookup)
+                reverse_mappings = {v: k for k, v in self.PARAMETER_ALIASES.items() if v != k}
+                if key in reverse_mappings:
+                    canonical_key = key  # It's already canonical
+            
             translated_params[canonical_key] = value
             
         return translated_params
@@ -454,7 +561,7 @@ Original Query: {{ original_query }}
 
     def _generate_tool_documentation_string(self) -> str:
         """
-        Enhanced tool documentation generation with better formatting.
+        Enhanced tool documentation generation with better formatting and alias information.
         """
         doc_lines = []
         for tool in TOOL_REGISTRY.values():
@@ -549,7 +656,7 @@ if __name__ == '__main__':
     import time
     from src.core.planners.query_parser import SpatialConstraint, SpatialRelationship
 
-    print("🚀 Running Iterative AI-GIS Workflow Generator Test")
+    print("🚀 Running Enhanced Iterative AI-GIS Workflow Generator Test")
     print("=" * 70)
 
     # Test the refactored iterative approach
@@ -564,7 +671,7 @@ if __name__ == '__main__':
         summary_required=True
     )
 
-    print(f"\n🧪 Testing Iterative Approach")
+    print(f"\n🧪 Testing Enhanced Iterative Approach")
     print(f"   Query: Find '{test_query.target}' in '{test_query.location}'")
     print("-" * 50)
 
@@ -578,19 +685,27 @@ if __name__ == '__main__':
         print(f"✅ Initial context established")
         print(f"📊 {context['initial_observation']}")
         
-        # Simulate a few iterative steps
+        # Simulate a few iterative steps with enhanced layer tracking
         history = [context['initial_observation']]
         available_layers = {}
+        available_layer_names = []
         action_sequence = []
+        
+        # Simulate layer intelligence data structure
+        layer_intelligence = {}
         
         for step in range(3):  # Test 3 iterative steps
             print(f"\n--- Step {step + 1} ---")
+            print(f"📋 Available layers: {available_layer_names}")
+            print(f"🔍 Layer Intelligence: {list(layer_intelligence.keys())}")
             
-            # Get next action
+            # Get next action with enhanced context including layer intelligence
             next_action = generator.get_next_action(
                 history=history,
                 original_query=context.get('original_query', ''),
-                rag_guidance=context.get('rag_guidance', '')
+                rag_guidance=context.get('rag_guidance', ''),
+                available_layers=available_layer_names,
+                layer_intelligence=layer_intelligence  # ✅ NOW COMPATIBLE!
             )
             
             print(f"🎯 Next Action: {next_action.tool_name}")
@@ -609,10 +724,20 @@ if __name__ == '__main__':
                     history.append(f"Observation: {observation}")
                     break
                 else:
-                    # Simulate layer creation
+                    # Simulate layer creation with enhanced tracking
                     conceptual_name = next_action.parameters.get('conceptual_name', f'{next_action.tool_name}_output')
                     real_layer_name = f"{conceptual_name}_{step + 1}"
                     available_layers[conceptual_name] = real_layer_name
+                    available_layer_names.append(real_layer_name)
+                    
+                    # Simulate layer intelligence
+                    layer_intelligence[real_layer_name] = {
+                        'status': 'populated',
+                        'feature_count': 50,
+                        'columns': ['id', 'name', 'amenity', 'geometry'],
+                        'geometry_types': ['Point'],
+                        'crs': 'EPSG:4326'
+                    }
                     
                     observation = f"Created layer '{real_layer_name}' with 50 features."
                     history.append(f"Action: {next_action.tool_name}")
@@ -623,14 +748,15 @@ if __name__ == '__main__':
                 break
         
         end_time = time.time()
-        print(f"\n⏱️  Total Time: {end_time - start_time:.2f} seconds")
+        total_time = end_time - start_time
+        print(f"\n⏱️  Total Time: {total_time:.2f} seconds")
         print(f"🔄 Actions Taken: {len(action_sequence)}")
         
         # Store successful pattern
         if action_sequence:
             generator.store_successful_pattern(
                 original_query=context.get('original_query', ''),
-                action_sequence=action_sequence
+                action_sequence=action_sequence,
+                execution_time=total_time
             )
-
     print("\n" + "=" * 70)
