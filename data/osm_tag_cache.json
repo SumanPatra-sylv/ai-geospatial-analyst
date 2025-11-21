@@ -1,0 +1,12 @@
+{
+  "park": [
+    {
+      "landuse": "recreation_ground"
+    }
+  ],
+  "school": [
+    {
+      "building": "school"
+    }
+  ]
+}

@@ -133,46 +133,6 @@ LOAD_OSM_DATA = ToolDefinition(
     outputs=["GeoDataFrame with OSM features", "Layer added to workspace"]
 )
 
-LOAD_BHOONIDHI_DATA = ToolDefinition(
-    operation_name="load_bhoonidhi_data",
-    description="Load geospatial data from Bhoonidhi (India's national geospatial data repository). "
-                "Supports various data types including administrative boundaries, land use, and infrastructure.",
-    parameters=[
-        ToolParameter(
-            name="dataset_id",
-            description="Bhoonidhi dataset identifier or name",
-            type=ParameterType.STRING,
-            required=True
-        ),
-        ToolParameter(
-            name="state",
-            description="State name for filtering (optional)",
-            type=ParameterType.STRING,
-            required=False
-        ),
-        ToolParameter(
-            name="district",
-            description="District name for filtering (optional)",
-            type=ParameterType.STRING,
-            required=False
-        ),
-        ToolParameter(
-            name="layer_name",
-            description="Name for the resulting layer",
-            type=ParameterType.STRING,
-            required=False,
-            default="bhoonidhi_data"
-        )
-    ],
-    executor_method_name="_op_load_bhoonidhi_data",
-    category="data_loading",
-    examples=[
-        "Load administrative boundaries for West Bengal",
-        "Get land use data for Mumbai district"
-    ],
-    outputs=["GeoDataFrame with Bhoonidhi data", "Layer added to workspace"]
-)
-
 # Data Processing Tools
 FILTER_BY_ATTRIBUTE = ToolDefinition(
     operation_name="filter_by_attribute",
@@ -438,14 +398,13 @@ INTERSECT_ANALYSIS = ToolDefinition(
     category="spatial_analysis",
     examples=[
         "Find intersection of flood zones and residential areas",
-        "Intersect protected areas with development zones",
+        " Intersect protected areas with development zones",
         "Find overlap between different land use types"
     ],
     prerequisites=["Both layers must exist in workspace"],
     outputs=["Intersection features as GeoDataFrame", "New intersection layer"]
 )
 
-# *** ACTION 1: ADDED THE SUMMARIZE_DATA DEFINITION ***
 SUMMARIZE_DATA = ToolDefinition(
     operation_name="summarize",
     description="Summarizes a layer by selecting specific columns and providing basic statistics.",
@@ -631,7 +590,7 @@ CALCULATE_DISTANCE = ToolDefinition(
 TOOL_REGISTRY: Dict[str, ToolDefinition] = {
     # Data Loading Tools
     "load_osm_data": LOAD_OSM_DATA,
-    "load_bhoonidhi_data": LOAD_BHOONIDHI_DATA,
+    # NOTE: load_bhoonidhi_data removed - implementation not available in WorkflowExecutor
     
     # Data Processing Tools
     "filter_by_attribute": FILTER_BY_ATTRIBUTE,
@@ -648,7 +607,6 @@ TOOL_REGISTRY: Dict[str, ToolDefinition] = {
     # Analysis Tools
     "calculate_area": CALCULATE_AREA,
     "calculate_distance": CALCULATE_DISTANCE,
-    # *** ACTION 2: ADDED THE NEW TOOL TO THE REGISTRY ***
     "summarize": SUMMARIZE_DATA
 }
 

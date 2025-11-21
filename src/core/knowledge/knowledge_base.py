@@ -10,6 +10,19 @@ from typing import List, Dict, Optional, Any, Tuple
 from datetime import datetime, timedelta
 import hashlib
 
+# ChromaDB and Sentence Transformers imports for RAG integration
+try:
+    import chromadb
+    from chromadb.config import Settings
+    CHROMADB_AVAILABLE = True
+except ImportError:
+    CHROMADB_AVAILABLE = False
+
+try:
+    from sentence_transformers import SentenceTransformer
+    SENTENCE_TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    SENTENCE_TRANSFORMERS_AVAILABLE = False
 
 # Optional SpaCy import for advanced entity extraction
 try:
@@ -18,15 +31,13 @@ try:
 except ImportError:
     SPACY_AVAILABLE = False
 
-
 # Configure logging for better visibility
 logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
-
 
 class SpatialKnowledgeBase:
     """
     A state-of-the-art, self-expanding component for mapping natural language to OSM tags
-    with enhanced workflow memory capabilities for RAG-based query planning.
+    with enhanced workflow memory capabilities and dual-channel RAG-based query planning.
     
     Features:
     - Advanced NLP entity/modifier extraction with SpaCy
@@ -35,6 +46,7 @@ class SpatialKnowledgeBase:
     - Resilient external API lookups with quality gates
     - Persistent caching and SQLite database storage
     - Workflow pattern storage and retrieval for RAG systems
+    - Expert documentation search via ChromaDB vector database
     - Semantic similarity matching for query patterns
     - Performance metrics and analytics
     - Robust database operations with transactions and context managers
@@ -42,13 +54,17 @@ class SpatialKnowledgeBase:
     """
     
     def __init__(self, cache_file: str = "data/cache/tag_cache.json", 
-                 db_path: str = "data/knowledge_base/geospatial_knowledge.db"):
+                 db_path: str = "data/knowledge_base/geospatial_knowledge.db",
+                 vector_db_path: str = "data/vector_db",
+                 collection_name: str = "gis_documentation"):
         """
-        Initializes the knowledge base with persistent storage for tags and workflows.
+        Initializes the knowledge base with persistent storage for tags, workflows, and expert docs.
         
         Args:
             cache_file: Path to JSON cache file for entity-tag mappings
             db_path: Path to SQLite database for workflow storage
+            vector_db_path: Path to ChromaDB vector database
+            collection_name: Name of the ChromaDB collection for expert documentation
         """
         self.logger = logging.getLogger(__name__)
         self.inflect_engine = inflect.engine()
@@ -77,7 +93,7 @@ class SpatialKnowledgeBase:
             "fire station": [{"tag": {"amenity": "fire_station"}, "source": "local", "confidence": 1.0}],
             "cinema": [{"tag": {"amenity": "cinema"}, "source": "local", "confidence": 1.0}],
             "theater": [{"tag": {"amenity": "theatre"}, "source": "local", "confidence": 1.0}],
-            "park": [{"tag": {"leisure": "park"}, "source": "local", "confidence": 1.0}],
+            "park": [{"tag": {"leisure": "park"}, "source": "local", "confidence": 1.0}], # ✅ THE FIX
             "playground": [{"tag": {"leisure": "playground"}, "source": "local", "confidence": 1.0}],
             "hotel": [{"tag": {"tourism": "hotel"}, "source": "local", "confidence": 1.0}],
             "supermarket": [{"tag": {"shop": "supermarket"}, "source": "local", "confidence": 1.0}],
@@ -102,6 +118,16 @@ class SpatialKnowledgeBase:
         self.cache_file.parent.mkdir(parents=True, exist_ok=True)
         self._load_cache()
 
+        # Initialize RAG components (ChromaDB and SentenceTransformers)
+        self.vector_db_path = Path(vector_db_path)
+        self.collection_name = collection_name
+        self.chroma_client = None
+        self.expert_docs_collection = None
+        self.embedding_model = None
+        self._embedding_model_loaded = False  # Flag for lazy loading
+        
+        self._init_vector_database()
+
         # Initialize SpaCy if available
         self.nlp = None
         if SPACY_AVAILABLE:
@@ -111,6 +137,131 @@ class SpatialKnowledgeBase:
             except OSError:
                 self.logger.warning("SpaCy model 'en_core_web_sm' not found. Run 'python -m spacy download en_core_web_sm'. Falling back to regex.")
                 self.nlp = None
+
+    def _init_vector_database(self) -> None:
+        """Initialize ChromaDB client and load SentenceTransformer model for expert documentation RAG."""
+        if not CHROMADB_AVAILABLE:
+            self.logger.warning("ChromaDB not available. Expert documentation search will be disabled.")
+            return
+            
+        if not SENTENCE_TRANSFORMERS_AVAILABLE:
+            self.logger.warning("SentenceTransformers not available. Expert documentation search will be disabled.")
+            return
+        
+        try:
+            # Initialize ChromaDB persistent client
+            self.logger.info(f"Initializing ChromaDB client at: {self.vector_db_path}")
+            self.chroma_client = chromadb.PersistentClient(
+                path=str(self.vector_db_path),
+                settings=Settings(
+                    allow_reset=False,
+                    anonymized_telemetry=False
+                )
+            )
+            
+            # Get the existing expert documentation collection
+            try:
+                self.expert_docs_collection = self.chroma_client.get_collection(
+                    name=self.collection_name
+                )
+                collection_count = self.expert_docs_collection.count()
+                self.logger.info(f"Connected to existing ChromaDB collection '{self.collection_name}' with {collection_count} documents")
+            except Exception as e:
+                self.logger.warning(f"Could not connect to collection '{self.collection_name}': {e}")
+                self.logger.warning("Expert documentation search will be limited until collection is available.")
+                self.expert_docs_collection = None
+            
+            # Embedding model will be lazy-loaded when needed to avoid Windows hang
+            self.logger.info("SentenceTransformer will be loaded lazily when needed (prevents Windows hang)")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to initialize vector database components: {e}")
+            self.chroma_client = None
+            self.expert_docs_collection = None
+            self.embedding_model = None
+
+    def _ensure_embedding_model_loaded(self) -> bool:
+        """Lazy load the embedding model only when needed (prevents Windows hang on init)."""
+        if self._embedding_model_loaded:
+            return True
+            
+        if not SENTENCE_TRANSFORMERS_AVAILABLE:
+            self.logger.warning("SentenceTransformers not available")
+            return False
+        
+        try:
+            self.logger.info("Loading SentenceTransformer model: all-MiniLM-L6-v2 (lazy loading)")
+            self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+            self._embedding_model_loaded = True
+            self.logger.info("SentenceTransformer model loaded successfully")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to load embedding model: {e}")
+            return False
+    
+    def search_expert_docs(self, query_text: str, k: int = 2) -> List[str]:
+        """
+        Search expert GIS documentation using semantic similarity.
+        
+        This method provides the "Expert Knowledge" channel of our dual RAG system,
+        retrieving relevant expert documentation chunks based on semantic similarity.
+        
+        Args:
+            query_text: The query text to search for relevant documentation
+            k: Number of top similar document chunks to return
+            
+        Returns:
+            List of relevant document chunks as strings
+        """
+        if not query_text or not isinstance(query_text, str):
+            self.logger.warning("Invalid query_text provided for expert docs search")
+            return []
+        
+        if k <= 0:
+            k = 2
+        
+        # Lazy load the embedding model
+        if not self._ensure_embedding_model_loaded():
+            self.logger.warning("Embedding model not available")
+            return []
+        
+        # Check if RAG components are available
+        if not self.embedding_model or not self.expert_docs_collection:
+            self.logger.warning("RAG components not available. Ensure ChromaDB and SentenceTransformers are installed and collection exists.")
+            return []
+        
+        try:
+            # Generate embedding for the query text
+            self.logger.debug(f"Generating embedding for query: '{query_text[:50]}...'")
+            query_embedding = self.embedding_model.encode([query_text])
+            
+            # Perform similarity search in ChromaDB
+            search_results = self.expert_docs_collection.query(
+                query_embeddings=query_embedding.tolist(),
+                n_results=k
+            )
+            
+            # Extract document text from results
+            if search_results and search_results.get('documents'):
+                documents = search_results['documents'][0]  # First query's results
+                
+                # Filter out empty documents
+                relevant_docs = [doc for doc in documents if doc and doc.strip()]
+                
+                if relevant_docs:
+                    self.logger.info(f"Found {len(relevant_docs)} relevant expert documentation chunks for query")
+                    return relevant_docs
+                else:
+                    self.logger.info("No relevant expert documentation found for query")
+                    return []
+            else:
+                self.logger.info("No expert documentation results returned from vector search")
+                return []
+                
+        except Exception as e:
+            self.logger.error(f"Error during expert documentation search: {e}", 
+                            extra={'error_type': type(e).__name__, 'query': query_text[:100]})
+            return []
 
     def _init_database(self) -> None:
         """Initializes the SQLite database with tables for tags and successful workflows."""
@@ -278,9 +429,12 @@ class SpatialKnowledgeBase:
                             extra={'error_type': type(e).__name__})
             return False
 
-    def retrieve_similar_workflows(self, user_query: str, limit: int = 5) -> List[Dict[str, Any]]:
+    def search_similar_workflows(self, user_query: str, limit: int = 5) -> List[Dict[str, Any]]:
         """
-        Retrieves similar successful workflows based on query similarity.
+        Search for similar successful workflows based on query similarity.
+        
+        This method provides the "Workflow Patterns" channel of our dual RAG system,
+        retrieving similar successful workflow patterns based on query similarity.
         
         Args:
             user_query: The user's query
@@ -696,20 +850,17 @@ class SpatialKnowledgeBase:
         explanation["reasoning"] = "No local match found. Querying external Taginfo API."
         tags = self.query_external_sources(normalized)
         return tags, explanation
-
+        
     def query_external_sources(self, keyword: str) -> List[Dict[str, Any]]:
         """
-        Query Taginfo API for tag suggestions with quality filtering.
-        
+        Query Taginfo API for tag suggestions with quality filtering.     
         Args:
-            keyword: Keyword to search for
-            
+            keyword: Keyword to search for          
         Returns:
             List of quality-filtered tag suggestions
         """
         if not keyword:
-            return []
-        
+            return []      
         self.logger.info(f"Querying Taginfo API for '{keyword}'...")
         url = "https://taginfo.openstreetmap.org/api/4/search/by_keyword"
         params = {
@@ -717,152 +868,146 @@ class SpatialKnowledgeBase:
             "lang": "en",
             "sortname": "count_all",
             "sortorder": "desc"
-        }
-        
+        }       
         try:
             response = requests.get(url, params=params, timeout=10)
             response.raise_for_status()
-            data = response.json().get("data", [])
-            
+            data = response.json().get("data", [])           
             results = []
             for item in data:
                 # Enhanced quality gates
                 is_documented = item.get("in_wiki", False)
                 has_usage = item.get("count_all", 0) > 1000
-                has_key_value = item.get("key") and item.get("value")
-                
+                has_key_value = item.get("key") and item.get("value")              
                 if has_key_value and (is_documented or has_usage):
                     confidence = 0.8 if is_documented else 0.6
                     results.append({
                         "tag": {item["key"]: item["value"]},
                         "source": "external",
                         "confidence": confidence
-                    })
-                
+                    })               
                 if len(results) >= 3:
-                    break
-            
+                    break            
             if results:
                 self.add_entity(keyword, results)
                 self.logger.info(f"Found {len(results)} quality tags for '{keyword}'", 
                                extra={'keyword': keyword, 'results_count': len(results)})
             else:
                 self.logger.warning(f"No quality results from Taginfo for '{keyword}'", 
-                                  extra={'keyword': keyword})
-            
-            return results
-            
+                                  extra={'keyword': keyword})           
+            return results           
         except requests.RequestException as e:
             self.logger.error(f"Taginfo API request failed for '{keyword}': {e}", 
                             extra={'error_type': type(e).__name__, 'keyword': keyword})
             return []
-
+            
     def get_closest_key(self, query: str) -> Optional[str]:
         """
         Find the closest matching key using fuzzy string matching.
-        
         Args:
-            query: Query to find matches for
-            
+            query: Query to find matches for       
         Returns:
             Closest matching key or None
         """
         if not query:
-            return None
-        
+            return None       
         all_keys = list(self.entity_to_tags_map.keys())
         matches = get_close_matches(query, all_keys, n=1, cutoff=0.8)
         return matches[0] if matches else None
-
+        
     def tag_entities_in_sentence(self, sentence: str) -> List[Dict[str, Any]]:
         """
-        Extract entities from sentence and get their candidate tags.
-        
+        Extract entities from sentence and get their candidate tags.      
         Args:
-            sentence: Input sentence to analyze
-            
+            sentence: Input sentence to analyze          
         Returns:
             List of entities with their candidate tags and explanations
         """
         if not sentence:
-            return []
-        
+            return []        
         extracted_groups = self.extract_entities(sentence)
         results = []
-        seen_entities = set()
-        
+        seen_entities = set()   
         for group in extracted_groups:
             entity = group["entity"]
             if entity in seen_entities:
                 continue
-            seen_entities.add(entity)
-            
+            seen_entities.add(entity)     
             tags, explanation = self.get_candidate_tags(entity)
             results.append({
                 **group,
                 "candidate_tags": tags,
                 "explanation": explanation
-            })
-        
+            }) 
         return results
-
 
 # === Enhanced Example Usage & Testing ===
 if __name__ == "__main__":
     kb = SpatialKnowledgeBase()
     
-    print("=== Enhanced SpatialKnowledgeBase with Workflow Memory ===\n")
+    print("=== Enhanced SpatialKnowledgeBase with Dual-Channel RAG ===\n")
+    
+    # Test RAG components
+    print("1. Testing RAG Components")
+    if kb.embedding_model and kb.expert_docs_collection:
+        print("✅ RAG components initialized successfully")
+        print(f"   - Vector database: {kb.vector_db_path}")
+        print(f"   - Collection: {kb.collection_name}")
+        print(f"   - Collection size: {kb.expert_docs_collection.count()} documents")
+    else:
+        print("⚠️ RAG components not available")
+    
+    # Test expert documentation search
+    print("\n2. Testing Expert Documentation Search")
+    expert_docs = kb.search_expert_docs("spatial join best practices", k=2)
+    print(f"Found {len(expert_docs)} relevant expert documentation chunks:")
+    for i, doc in enumerate(expert_docs, 1):
+        print(f"   {i}. {doc[:100]}...")
     
     # Test workflow storage
-    print("1. Testing Workflow Storage")
+    print("\n3. Testing Workflow Storage")
     sample_workflow = [
         {"step": "extract_entities", "entities": ["restaurant", "hospital"]},
         {"step": "get_osm_tags", "tags": {"amenity": "restaurant"}},
         {"step": "execute_query", "query": "overpass query"}
-    ]
-    
+    ] 
     success = kb.store_successful_workflow(
         "Find restaurants near hospitals",  # ✅ Uses original_query
         sample_workflow,
         execution_time=1.23
     )
-    print(f"Workflow stored: {success}")
+    print(f"Workflow stored: {success}") 
     
-    # Test workflow retrieval
-    print("\n2. Testing Workflow Retrieval")
-    similar = kb.retrieve_similar_workflows("restaurants close to medical facilities")
-    print(f"Found {len(similar)} similar workflows")
+    # Test workflow retrieval (renamed method)
+    print("\n4. Testing Workflow Pattern Search")
+    similar = kb.search_similar_workflows("restaurants close to medical facilities")
+    print(f"Found {len(similar)} similar workflow patterns")
     for i, workflow in enumerate(similar):
-        print(f"  {i+1}. Query: '{workflow['original_query']}' (similarity: {workflow['similarity_score']:.2f})")
+        print(f"  {i+1}. Query: '{workflow['original_query']}' (similarity: {workflow['similarity_score']:.2f})") 
     
     # Test statistics
-    print("\n3. Testing Statistics")
+    print("\n5. Testing Statistics")
     stats = kb.get_workflow_statistics()
     print(f"Workflow Statistics: {json.dumps(stats, indent=2)}")
     
     # Test existing functionality
-    print("\n4. Testing Entity Extraction")
+    print("\n6. Testing Entity Extraction")
     sentence = "Show me restaurants and hospitals near parks"
     tagged = kb.tag_entities_in_sentence(sentence)
     print(f"Extracted entities: {len(tagged)}")
     for entity_data in tagged:
         print(f"  - {entity_data['entity']}: {len(entity_data['candidate_tags'])} tags")
     
-    # ✅ Added: Test edge cases
-    print("\n5. Testing Edge Cases")
-    # Empty query
-    similar_empty = kb.retrieve_similar_workflows("")
-    print(f"Similar workflows for empty query: {len(similar_empty)}")
+    # Test dual RAG channels
+    print("\n7. Testing Dual RAG Channels")
+    query = "proximity analysis workflow"
     
-    # DB cleanup
-    kb.cleanup_database(max_age_days=1)  # Test with small age for demo
+    # Channel 1: Expert Documentation
+    expert_results = kb.search_expert_docs(query, k=2)
+    print(f"Expert Documentation Channel: {len(expert_results)} results")
     
-    # Invalid storage
-    success_invalid = kb.store_successful_workflow("Invalid", [], execution_time=0.0)
-    print(f"Invalid workflow stored: {success_invalid}")
+    # Channel 2: Workflow Patterns  
+    workflow_results = kb.search_similar_workflows(query, limit=2)
+    print(f"Workflow Patterns Channel: {len(workflow_results)} results")
     
-    # Test analytics
-    kb.store_query_analytics("test query", 0.5, True)
-    kb.store_query_analytics("failed query", 2.0, False, "Test error")
-    
-    print("\n=== Enhanced Knowledge Base Ready for RAG Integration ===")
+    print("\n=== Dual-Channel RAG Knowledge Base Ready! ===")

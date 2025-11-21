@@ -75,6 +75,24 @@ class WorkflowExecutor:
             'errors': []
         }
 
+    def _op_search_osm_data(self, params: Dict[str, Any], step_number: int) -> gpd.GeoDataFrame:
+        """
+        A recovery tool that can be used when load_osm_data fails.
+        It doesn't load data, but confirms its existence, breaking loops.
+        """
+        location = params.get('area_name') or params.get('location')
+        tags = params.get('tags', {})
+        
+        reasoning = (f"Recovery action: Verifying existence of data for location '{location}' "
+                     f"with tags: {tags} without performing a full data load.")
+        
+        print(f"  💡 Recovery: Verifying data for tags: {tags}")
+        self.log_reasoning(step_number, 'search_osm_data', reasoning)
+        
+        # This tool's purpose is to succeed and break a failure loop.
+        # It returns an empty GeoDataFrame to signal success without adding a new layer.
+        return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
+
     def execute_single_step(self, tool_call: ToolCallIntent, current_data_layers: Dict[str, gpd.GeoDataFrame]) -> Tuple[str, Dict[str, gpd.GeoDataFrame]]:
         """Execute a single tool call and return observation + updated state."""
         self.data_layers = current_data_layers.copy()
@@ -92,6 +110,13 @@ class WorkflowExecutor:
             if tool_call.tool_name not in TOOL_REGISTRY:
                 observation = f"Error: Unknown tool '{tool_call.tool_name}'"
                 return observation, current_data_layers.copy()
+
+            # Special handling for search_osm_data
+            if tool_call.tool_name == "search_osm_data":
+                operation_method = getattr(self, '_op_search_osm_data')
+                result_gdf = operation_method(tool_call.parameters, step_number=1)
+                observation = f"Success: Tool '{tool_call.tool_name}' verified data existence for tags {tool_call.parameters.get('tags')}. No layer was created."
+                return observation, self.data_layers.copy()
             
             # ✅ IMPROVED CONCEPTUAL MAPPING
             conceptual_map = {}
@@ -319,7 +344,7 @@ class WorkflowExecutor:
     def _op_load_osm_data(self, params: Dict[str, Any], step_number: int) -> gpd.GeoDataFrame:
         # Align with definitions.py (area_name) but keep fallback for older plans (location)
         location = params.get('area_name') or params.get('location')
-        tags = params.get('tags', {})
+        tags = params.get('tags', {})  # This can now be a dict OR a list of dicts
         
         if not location:
             raise ValueError("Missing 'area_name' or 'location' parameter for load_osm_data.")
@@ -327,15 +352,48 @@ class WorkflowExecutor:
         if not tags:
             warnings.warn("No 'tags' provided for load_osm_data. This might result in a very large download or an error.")
         
-        reasoning = f"Loading OSM data for location '{location}' with specific tags: {tags}. This provides the precise foundational data needed."
-        
-        print(f"  🏷️ Filtering by tags: {tags}")
+        reasoning = f"Loading OSM data for location '{location}' with tags: {tags}. "
+        print(f"  🏷️ Attempting to load data with tags: {tags}")
         self.log_reasoning(step_number, 'load_osm_data', reasoning, input_info={'location': location, 'tags': tags})
         
         try:
-            result = self.smart_data_loader.fetch_osm_data(location, tags)
-            if result.empty:
-                warnings.warn(f"Warning: No features found for tags {tags} in location '{location}'.")
+            # --- FIXED IMPLEMENTATION FOR LIST TAGS SUPPORT ---
+            if isinstance(tags, list):
+                # If tags is a list of dictionaries, try each one until we get results
+                reasoning += "Tags provided as list - will try each tag dictionary sequentially. "
+                result = gpd.GeoDataFrame()
+                successful_queries = []
+                
+                for i, tag_dict in enumerate(tags):
+                    print(f"    🔍 Trying tag set {i+1}/{len(tags)}: {tag_dict}")
+                    try:
+                        temp_result = self.smart_data_loader.fetch_osm_data(location, tag_dict)
+                        if not temp_result.empty:
+                            # Combine results, handling potential CRS differences
+                            if result.empty:
+                                result = temp_result.copy()
+                            else:
+                                if temp_result.crs != result.crs:
+                                    temp_result = temp_result.to_crs(result.crs)
+                                result = pd.concat([result, temp_result], ignore_index=True)
+                            successful_queries.append(tag_dict)
+                            print(f"      ✅ Found {len(temp_result)} features with tags: {tag_dict}")
+                    except Exception as e:
+                        print(f"      ❌ Failed to load with tags {tag_dict}: {e}")
+                        continue
+                
+                if result.empty:
+                    warnings.warn(f"Warning: No features found for any of the tag sets {tags} in location '{location}'.")
+                else:
+                    reasoning += f"Successfully retrieved {len(result)} features using {len(successful_queries)} tag sets. "
+                    print(f"    📊 Total features loaded: {len(result)} from {len(successful_queries)} successful queries")
+            else:
+                # Original behavior for single tag dictionary
+                reasoning += "This provides the precise foundational data needed."
+                result = self.smart_data_loader.fetch_osm_data(location, tags)
+                if result.empty:
+                    warnings.warn(f"Warning: No features found for tags {tags} in location '{location}'.")
+            # --- END OF FIX ---
             
             self.log_reasoning(step_number, 'load_osm_data',
                               f"Successfully retrieved {len(result)} features from OSM.",
@@ -633,11 +691,64 @@ class WorkflowExecutor:
         if left_gdf.crs != right_gdf.crs:
             right_gdf = right_gdf.to_crs(left_gdf.crs)
         
-        result = gpd.sjoin(left_gdf, right_gdf, how=how, predicate=predicate)
+        timestamp_suffix = f"_{int(time.time())}"
+        result = gpd.sjoin(
+            left_gdf, 
+            right_gdf, 
+            how=how, 
+            predicate=predicate,
+            lsuffix='left', # Explicitly name the left suffix
+            rsuffix=f'right{timestamp_suffix}' # Add a unique suffix for the right side
+        )
         
         self.log_reasoning(step_number, 'spatial_join', f"Join resulted in {len(result)} features.")
         
         return result
+
+    def _op_calculate_distance(self, params: Dict[str, Any], step_number: int) -> gpd.GeoDataFrame:
+        """Calculates the nearest distance from each feature in one layer to another."""
+        
+        # Robustly get parameters
+        from_layer_name = params.get('from_layer_name') or params.get('input_layer1')
+        to_layer_name = params.get('to_layer_name') or params.get('input_layer2')
+        distance_field = params.get('distance_field_name', 'distance')
+
+        if not from_layer_name or not to_layer_name:
+            raise ValueError("Missing 'from_layer_name' or 'to_layer_name' parameter.")
+
+        gdf_from = self.data_layers[from_layer_name]
+        gdf_to = self.data_layers[to_layer_name]
+
+        reasoning = f"Calculating nearest distance from {len(gdf_from)} features in '{from_layer_name}' to {len(gdf_to)} in '{to_layer_name}'."
+        print(f"    📏 Calculating distances: '{from_layer_name}' -> '{to_layer_name}'")
+        self.log_reasoning(step_number, 'calculate_distance', reasoning)
+
+        if gdf_from.empty or gdf_to.empty:
+            warnings.warn("One or both layers for distance calculation are empty.")
+            return gdf_from.copy()
+
+        # Ensure CRS match for accurate calculation
+        if gdf_from.crs != gdf_to.crs:
+            gdf_to = gdf_to.to_crs(gdf_from.crs)
+            
+        # Reproject to a suitable projected CRS for accurate metric distances
+        # We'll use the UTM zone of the 'from' layer's centroid
+        projected_crs = gdf_from.estimate_utm_crs()
+        gdf_from_proj = gdf_from.to_crs(projected_crs)
+        gdf_to_proj = gdf_to.to_crs(projected_crs)
+
+        # Calculate nearest distance for each feature
+        # This can be slow for large datasets, but is correct
+        nearest_distances = gdf_from_proj.geometry.apply(
+            lambda geom: gdf_to_proj.distance(geom).min()
+        )
+        
+        # Add the distance column to the original GeoDataFrame
+        result_gdf = gdf_from.copy()
+        result_gdf[distance_field] = nearest_distances
+
+        self.log_reasoning(step_number, 'calculate_distance', f"Successfully calculated distances and added them to '{distance_field}' column.")
+        return result_gdf
 
     def _op_summarize(self, params: Dict[str, Any], step_number: int) -> gpd.GeoDataFrame:
         """

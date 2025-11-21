@@ -1,0 +1,5 @@
+GIS Best Practice: For proximity analysis to find features "near" each other, the most effective workflow is to first use the 'buffer' tool on one layer to create a search area, and then use the 'spatial_join' tool with the 'intersects' predicate.
+
+GIS Best Practice: When performing any spatial operation between two layers, such as a spatial join or clip, it is critical to ensure that both layers share the same Coordinate Reference System (CRS). If they do not, one layer must be reprojected to match the other before the operation.
+
+GIS Best Practice: To find features from one layer that are completely inside another (e.g., points within polygons), the 'intersects' spatial predicate is the most robust and computationally efficient choice for a spatial join.
