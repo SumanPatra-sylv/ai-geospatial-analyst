@@ -409,10 +409,21 @@ class MasterOrchestrator:
         
         try:
             context = self.strategist.get_initial_context(parsed_query, rag_guidance=rag_guidance)
-            if not context["success"]:
-                return self._handle_critical_failure(context['error'])
+            
+            # === FIX 1: STOP THE CRASH (Defensive Null Check) ===
+            if context is None:
+                return self._handle_critical_failure(
+                    f"Data Scout failed to validate location '{parsed_query.location}'. "
+                    "The location might be invalid, too large (e.g., a continent), or the server is down."
+                )
+            
+            # Check for explicit failure flag safely using .get()
+            if not context.get("success", False):
+                return self._handle_critical_failure(context.get('error', 'Unknown context error'))
+                
         except Exception as e:
-            return self._handle_critical_failure(f"Context initialization failed: {e}")
+            # Catch unexpected crashes during initialization
+            return self._handle_critical_failure(f"Context initialization crash: {e}")
         
         print(f"✅ Location validated: {context['data_report'].location.canonical_name}")
         

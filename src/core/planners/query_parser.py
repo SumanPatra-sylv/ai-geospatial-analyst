@@ -14,7 +14,7 @@ import os
 import jinja2
 import requests
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -43,6 +43,19 @@ class ParsedQuery(BaseModel):
     constraints: Optional[List[SpatialConstraint]] = Field(default=None, description="Optional list of spatial constraints")
     # This field is new, added to match the upgraded prompt
     summary_required: bool = Field(..., description="True if the user asks for a summary, count, or list")
+
+    @field_validator('constraints', mode='before')
+    @classmethod
+    def set_constraints_default(cls, v):
+        """
+        FIX: Bulletproof protection against None/Null from LLM.
+        If the LLM returns "constraints": null, this converts it to [].
+        This prevents "'NoneType' object is not iterable" crashes in workflow_generator.py
+        when code tries to iterate: [c.feature_type for c in parsed_query.constraints]
+        """
+        if v is None:
+            return []
+        return v
 
 
 # --- Real LLM Caller (Unchanged) ---

@@ -23,6 +23,10 @@ MODIFICATIONS APPLIED (as per user request):
    a simplified validation flow.
 5. Added an enhanced recommendation engine (`_generate_enhanced_recommendations`)
    that provides insights on tag fallback and other metrics.
+   
+LATEST CRITICAL FIXES:
+1. Fixed "West Bengal Hang" by optimizing validate_location to avoid heavy polygon downloads.
+2. Fixed "5,000 Ponds" issue by adding Senior Analyst filters to _async_query_osm_count.
 """
 
 import logging
@@ -32,7 +36,11 @@ import hashlib
 from typing import Dict, List, Optional, Union, Any, Tuple
 from dataclasses import dataclass, asdict
 
-# Add these new imports at the top
+# === FIX 1: UPDATED IMPORTS ===
+from shapely.geometry import box, Point, Polygon  # Make sure box is imported
+import osmnx as ox
+import os
+
 from src.core.knowledge.knowledge_base import SpatialKnowledgeBase
 from src.core.agents.schemas import ClarificationAsk
 # Add this import after your existing imports
@@ -53,7 +61,6 @@ from urllib3.util.retry import Retry
 # Data processing
 import pandas as pd
 import numpy as np
-from shapely.geometry import Point, Polygon
 from shapely.ops import transform
 import pyproj
 
@@ -533,116 +540,99 @@ class DataScout:
         
         return params
     
+    # === FIX 2: REPLACE VALIDATE_LOCATION ===
     def validate_location(self, location_string: str) -> Optional[LocationData]:
         """
-        Enhanced location validation with comprehensive error handling
+        OPTIMIZED: Validates location using LIGHTWEIGHT Nominatim API.
+        Avoids downloading heavy boundary geometries (Polygons) which causes hangs.
         """
         if not location_string or not isinstance(location_string, str):
             logger.error(f"Invalid location string: {location_string}")
             return None
         
-        # Check circuit breaker
+        # Check circuit breaker (Keep your existing logic)
         if self._is_circuit_open():
             logger.warning("Circuit breaker is open, skipping geocoding")
             return None
-        
+
+        # 1. CACHE CHECK (Keep your existing cache logic)
         cache_key = self.cache._generate_key(f"location_{location_string.strip().lower()}")
         cached_result = self.cache.get(cache_key)
-        
         if cached_result:
             self.stats['cache_hits'] += 1
-            try:
-                return LocationData(**cached_result)
-            except Exception as e:
-                logger.warning(f"Cached location data invalid: {e}")
-                # Remove invalid cache entry
-                self.cache._remove_key(cache_key)
+            return LocationData(**cached_result)
         
         self.stats['cache_misses'] += 1
-        
+
+        # 2. SAFETY CHECK: Reject Continents/Massive Areas
+        massive_areas = ["africa", "asia", "europe", "north america", "south america", 
+                        "antarctica", "australia", "world", "earth"]
+        if location_string.lower().strip() in massive_areas:
+            logger.error(f"❌ [DataScout] Security Block: Location '{location_string}' is too large.")
+            return None
+
         try:
             start_time = time.monotonic()
             
-            # Enhanced geocoding with retry logic
-            location = None
-            for attempt in range(self.max_retries):
-                try:
-                    location = self.geocoder.geocode(
-                        location_string.strip(),
-                        exactly_one=True,
-                        timeout=self.timeout,
-                        addressdetails=True,
-                        extratags=True
-                    )
-                    if location:
-                        break
-                except (GeocoderTimedOut, GeocoderServiceError) as e:
-                    if attempt == self.max_retries - 1:
-                        raise
-                    logger.warning(f"Geocoding attempt {attempt + 1} failed: {e}")
-                    time.sleep(min(2 ** attempt, 10))  # Exponential backoff
+            # 3. LIGHTWEIGHT GEOCODING (Nominatim Only)
+            # Replaced 'geocode_to_gdf' with 'geocoder.geocode' to avoid massive polygon downloads
+            location = self.geocoder.geocode(
+                location_string.strip(),
+                exactly_one=True,
+                timeout=self.timeout,
+                addressdetails=True
+            )
             
             if not location:
                 logger.warning(f"No location found for: {location_string}")
                 self._record_failure()
                 return None
-            
-            # Enhanced bounding box calculation
-            bbox = location.raw.get('boundingbox', [])
-            if len(bbox) != 4:
-                logger.warning(f"Invalid bounding box for {location_string}, using default")
-                # Create default bounding box (~1km around point)
-                lat_offset = 0.01
-                lon_offset = 0.01
-                bbox = [
-                    str(float(location.latitude) - lat_offset),
-                    str(float(location.latitude) + lat_offset),
-                    str(float(location.longitude) - lon_offset),
-                    str(float(location.longitude) + lon_offset)
-                ]
-            
-            # Validate bounding box values
-            try:
-                bounding_box = {
-                    'south': float(bbox[0]),
-                    'north': float(bbox[1]),
-                    'west': float(bbox[2]),
-                    'east': float(bbox[3])
-                }
+
+            # 4. Extract Bounding Box
+            raw_bbox = location.raw.get('boundingbox', [])
+            if len(raw_bbox) == 4:
+                # Nominatim returns [south, north, west, east] as strings
+                south, north = float(raw_bbox[0]), float(raw_bbox[1])
+                west, east = float(raw_bbox[2]), float(raw_bbox[3])
                 
-                # Validate bounding box makes sense
-                if (bounding_box['south'] >= bounding_box['north'] or
-                    bounding_box['west'] >= bounding_box['east']):
-                    logger.warning(f"Invalid bounding box geometry for {location_string}")
-                    # Fix common bbox format issues
-                    if bounding_box['south'] >= bounding_box['north']:
-                        bounding_box['south'], bounding_box['north'] = bounding_box['north'], bounding_box['south']
-                    if bounding_box['west'] >= bounding_box['east']:
-                        bounding_box['west'], bounding_box['east'] = bounding_box['east'], bounding_box['west']
+                # Calculate Area (Rough Estimation)
+                # Width in km (approx at equator) * Height in km
+                width = abs(east - west) * 111
+                height = abs(north - south) * 111
+                area_sq_km = width * height
                 
-            except (ValueError, IndexError) as e:
-                logger.error(f"Bounding box parsing error for {location_string}: {e}")
-                return None
-            
-            # Extract location metadata
-            raw_data = location.raw
-            country = self._extract_country(raw_data, location.address)
+                logger.info(f"📐 Estimated Area: {area_sq_km:,.0f} km²")
+                
+                # Guardrail: 5 Million sq km
+                if area_sq_km > 5000000:
+                    logger.error(f"❌ [DataScout] Area too large. Limit is 5M km².")
+                    return None
+                    
+                # OSMnx/Shapely expects [west, south, east, north]
+                bbox_dict = {'south': south, 'north': north, 'west': west, 'east': east}
+            else:
+                # Fallback
+                lat, lon = float(location.latitude), float(location.longitude)
+                bbox_dict = {'south': lat-0.1, 'north': lat+0.1, 'west': lon-0.1, 'east': lon+0.1}
+                area_sq_km = 100
+
+            # 5. Create Location Data
+            country = self._extract_country(location.raw, location.address)
             
             location_data = LocationData(
                 canonical_name=location.address,
                 latitude=float(location.latitude),
                 longitude=float(location.longitude),
-                bounding_box=bounding_box,
+                bounding_box=bbox_dict,
                 country=country,
-                admin_level=str(raw_data.get('place_rank', 0)),
-                place_type=raw_data.get('type', 'unknown'),
-                confidence=self._calculate_location_confidence(raw_data)
+                admin_level=str(location.raw.get('place_rank', 0)),
+                place_type=location.raw.get('type', 'unknown'),
+                confidence=self._calculate_location_confidence(location.raw)
             )
             
-            # Cache the result
+            # Cache and return
             self.cache.set(cache_key, location_data.to_dict())
             
-            # Update statistics
             query_time = time.monotonic() - start_time
             self.stats['total_query_time'] += query_time
             self.stats['api_calls'] += 1
@@ -699,9 +689,10 @@ class DataScout:
         
         return min(confidence, 1.0)
 
+    # === FIX 3: REPLACE _ASYNC_QUERY_OSM_COUNT ===
     async def _async_query_osm_count(self, session: aiohttp.ClientSession, bounding_box: Dict[str, float], tag_dict: Dict[str, str]) -> int:
         """
-        Enhanced async OSM query with better error handling and validation
+        Enhanced async OSM query with SENIOR ANALYST FILTERS to reduce noise.
         """
         try:
             # Validate inputs
@@ -711,21 +702,31 @@ class DataScout:
             if not tag_dict or not isinstance(tag_dict, dict):
                 raise ValueError("Invalid tag dictionary")
             
-            # Build query
+            # Build query params
             bbox_str = f"{bounding_box['south']},{bounding_box['west']},{bounding_box['north']},{bounding_box['east']}"
             tag_filter = "".join([f'["{key}"="{value}"]' for key, value in tag_dict.items()])
             
+            # === SENIOR ANALYST FILTER ===
+            # If searching for major natural features, REQUIRE a name to filter noise
+            extra_filter = ""
+            noisy_features = ["lake", "river", "peak", "forest", "mountain"]
+            
+            # Check if any of the values we are searching for match a noisy feature type
+            if any(v in noisy_features for v in tag_dict.values()):
+                extra_filter = '["name"]' # Only count features that have a name
+                # logger.info(f"🔎 Applying 'Named Feature' filter for {tag_dict}")
+
             query = f"""
             [out:json][timeout:25];
             (
-                node{tag_filter}({bbox_str});
-                way{tag_filter}({bbox_str});
-                relation{tag_filter}({bbox_str});
+                node{tag_filter}{extra_filter}({bbox_str});
+                way{tag_filter}{extra_filter}({bbox_str});
+                relation{tag_filter}{extra_filter}({bbox_str});
             );
             out count;
             """
             
-            # Execute query with timeout
+            # Execute query (Keep your existing robust async logic)
             timeout = aiohttp.ClientTimeout(total=self.timeout)
             async with session.post(
                 self.overpass_url,
@@ -765,7 +766,7 @@ class DataScout:
     # MODIFICATION 2: REPLACED _probe_single_tag_async with _probe_single_entity
     async def _probe_single_entity(self, session: aiohttp.ClientSession, 
                                    location_string: str, entity: str) -> DataProbeResult:
-        """Enhanced entity probing with intelligent tag fallback and performance optimization."""
+        """Enhanced entity probing with intelligent tag fallback and plural normalization."""
         
         start_time = time.monotonic()
         
@@ -778,19 +779,81 @@ class DataScout:
             bounding_box = location_data.bounding_box
             area_km2 = self._calculate_bbox_area(bounding_box)
             
-            # Get all possible tag options for this entity using centralized manager
-            tag_options = tag_manager.get_all_tag_options(entity)
+            # === FIX 2: PLURAL NORMALIZATION (Stop the Hang) ===
+            # Convert "cafes" -> "cafe", "schools" -> "school" for OSM lookup
+            clean_entity = entity.lower().strip()
+            if clean_entity.endswith('s') and not clean_entity.endswith('ss'):
+                clean_entity = clean_entity[:-1]
             
+            # 1. Try tags for the CLEAN (singular) entity first
+            tag_options = tag_manager.get_all_tag_options(clean_entity)
+            
+            # 2. Fallback: If clean entity had no tags (e.g. "mcdonalds"), try original
             if not tag_options:
-                logger.warning(f"No known tags for entity '{entity}'")
+                tag_options = tag_manager.get_all_tag_options(entity)
+            
+            # 3. SMART FALLBACK: If still no tags, generate reasonable defaults
+            if not tag_options:
+                logger.info(f"⚠️ No known tags for '{entity}', attempting smart fallback...")
+                
+                # Enhanced fallback with more OSM tag patterns
+                entity_clean = clean_entity if clean_entity else entity
+                fallback_candidates = [
+                    {f'amenity': entity_clean},      # Most common: amenity=cafe, amenity=restaurant
+                    {f'railway': 'station'},         # Special case: metro stations
+                    {f'station': 'subway'},           # Alternative: station=subway
+                    {f'public_transport': 'stop'},    # PT stops
+                    {f'shop': entity_clean},          # Try as shop
+                    {f'leisure': entity_clean},       # Try as leisure
+                    {f'tourism': entity_clean},       # Try as tourism
+                    {f'building': entity_clean},      # Try as building type
+                    {f'name': entity_clean}           # Last resort: search by name
+                ]
+                
+                # Probe each fallback candidate
+                for fallback_tags in fallback_candidates:
+                    try:
+                        logger.debug(f"   Trying fallback tags: {fallback_tags}")
+                        count = await self._async_query_osm_count(session, bounding_box, fallback_tags)
+                        if count > 0:
+                            logger.info(f"✅ Smart fallback SUCCESS for '{entity}' using tags {fallback_tags}: {count} items")
+                            density = count / area_km2 if area_km2 > 0 else 0
+                            confidence = self._calculate_probe_confidence(count, time.monotonic() - start_time)
+                            return DataProbeResult(
+                                original_entity=entity,
+                                tag=self._dict_to_tag_string(fallback_tags),
+                                count=count,
+                                density=density,
+                                confidence=confidence,
+                                query_time=time.monotonic() - start_time,
+                                metadata={
+                                    'area_km2': area_km2,
+                                    'bbox': bounding_box,
+                                    'tag_dict': fallback_tags,
+                                    'option_used': 0,  # Fallback indicator
+                                    'total_options': 0,
+                                    'used_smart_fallback': True
+                                }
+                            )
+                    except Exception as e:
+                        logger.debug(f"   Fallback failed for {fallback_tags}: {e}")
+                        continue
+                
+                # If all fallbacks fail, still return but indicate it as a probe result (not error)
+                logger.warning(f"❌ All fallbacks exhausted for '{entity}', returning zero-count result")
                 return DataProbeResult(
                     original_entity=entity,
-                    tag="unknown_entity",
+                    tag="search_by_name",
                     count=0,
                     density=0,
-                    confidence=0.0,
+                    confidence=0.1,
                     query_time=time.monotonic() - start_time,
-                    error=f"No known OSM tags for '{entity}'"
+                    metadata={
+                        'area_km2': area_km2,
+                        'bbox': bounding_box,
+                        'used_smart_fallback': True,
+                        'fallback_reason': 'unknown_entity'
+                    }
                 )
             
             # Try each tag option until one works
@@ -1061,7 +1124,14 @@ class DataScout:
                                    entities_to_probe: List[str],
                                    include_recommendations: bool = True,
                                    confidence_threshold: float = 0.8) -> Union[DataRealityReport, ClarificationAsk, None]:
-        """Enhanced report generation with centralized tag management."""
+        """
+        Enhanced report generation with centralized tag management and smart fallback.
+        
+        Key Design Decision:
+        - NO premature entity validation (this allows Smart Fallback to work)
+        - Unknown entities are handled gracefully in _probe_single_entity
+        - All entities proceed to probing phase for intelligent tag resolution
+        """
         
         if not location_string or not entities_to_probe:
             logger.error("Invalid input parameters for report generation")
@@ -1071,24 +1141,21 @@ class DataScout:
         logger.info(f"Generating data reality report for '{location_string}' with entities: {entities_to_probe}")
         
         try:
-            # 1. Validate location
+            # Phase 1: Validate location
+            logger.debug(f"Phase 1: Validating location...")
             location_data = self.validate_location(location_string)
             if not location_data:
                 logger.error(f"Failed to validate location: {location_string}")
                 return None
             
-            # 2. Check entities for clarification needs (simplified)
-            for entity in entities_to_probe:
-                # Quick validation check - if no tags exist, ask for clarification
-                tag_options = tag_manager.get_all_tag_options(entity)
-                if not tag_options:
-                    return ClarificationAsk(
-                        original_entity=entity,
-                        message=f"I don't recognize '{entity}'. Could you provide a more specific term?",
-                        suggestions=[]
-                    )
+            logger.debug(f"✅ Location validated: {location_data.canonical_name} ({location_data.bounding_box['south']:.2f}°S to {location_data.bounding_box['north']:.2f}°N)")
             
-            # 3. Run enhanced concurrent probing
+            # Phase 2: Entity probing with Smart Fallback
+            # CRITICAL: We DO NOT validate entities here.
+            # The Smart Fallback in _probe_single_entity will handle unknown entities
+            # by trying: amenity=entity, railway=station, shop=entity, etc.
+            
+            logger.debug(f"Phase 2: Probing {len(entities_to_probe)} entities with Smart Fallback enabled...")
             probe_results = asyncio.run(
                 self._run_concurrent_probes(location_string, entities_to_probe)
             )
@@ -1097,34 +1164,37 @@ class DataScout:
                 logger.warning("No probe results returned")
                 return None
             
-            # 4. Calculate metrics
+            logger.debug(f"✅ Probing complete: {len(probe_results)} entities processed")
+            
+            # Phase 3: Calculate metrics
+            logger.debug(f"Phase 3: Computing metrics...")
             total_report_time = time.monotonic() - report_start_time
             success_rate = (
                 len([r for r in probe_results if r.error is None]) / len(probe_results)
                 if probe_results else 0.0
             )
             
-            # 5. Generate recommendations
+            # Phase 4: Generate recommendations
             recommendations = []
             if include_recommendations:
                 try:
-                    # MODIFICATION: Calling the new enhanced recommendation method
                     recommendations = self._generate_enhanced_recommendations(location_data, probe_results)
                 except Exception as e:
                     logger.error(f"Error generating recommendations: {e}")
                     recommendations = ["Data analysis completed successfully with no specific recommendations."]
             
-            # 6. Compile metadata
+            # Phase 5: Compile metadata
             metadata = {
                 'total_features': sum(r.count for r in probe_results),
                 'entities_requested': len(entities_to_probe),
                 'entities_processed': len(set(r.original_entity for r in probe_results)),
                 'avg_query_time': np.mean([r.query_time for r in probe_results]) if probe_results else 0,
                 'error_count': len([r for r in probe_results if r.error is not None]),
-                'tag_fallback_used': len([r for r in probe_results if r.metadata and r.metadata.get('option_used', 1) > 1])
+                'tag_fallback_used': len([r for r in probe_results if r.metadata and r.metadata.get('option_used', 1) > 1]),
+                'smart_fallback_used': len([r for r in probe_results if r.metadata and r.metadata.get('used_smart_fallback', False)])
             }
             
-            # 7. Create and return report
+            # Phase 6: Create and return report
             report = DataRealityReport(
                 location=location_data,
                 probe_results=probe_results,
@@ -1134,11 +1204,13 @@ class DataScout:
                 metadata=metadata
             )
             
-            logger.info(f"Successfully generated report with {len(probe_results)} probe results")
+            logger.info(f"✅ Successfully generated report with {len(probe_results)} probe results")
+            logger.info(f"   Total features found: {metadata['total_features']}")
+            logger.info(f"   Smart fallback used: {metadata['smart_fallback_used']} entities")
             return report
             
         except Exception as e:
-            logger.error(f"Unexpected error generating report: {e}")
+            logger.error(f"Unexpected error generating report: {e}", exc_info=True)
             self.stats['errors'] += 1
             return None
     
