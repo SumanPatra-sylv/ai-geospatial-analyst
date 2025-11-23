@@ -78,3 +78,4 @@ context.md
 # NOTE: The 'data/boundaries' directory containing sample shapefiles
 # is intentionally NOT listed here, so that Git WILL track it. This
 # ensures new developers get the sample data when they clone the repo.
+data/vector_db/
