@@ -4,13 +4,14 @@ Execution Planner - Task Queue Architecture
 ==========================================
 
 This module implements the Planner component of the Planner-Executor architecture.
-It generates a deterministic task queue upfront,eliminating LLM-based loops.
+It generates a deterministic task queue upfront, eliminating LLM-based loops.
 
 Key Features:
 - Generates linear Task Queue from parsed query
 - Supports interleaved task types (LOAD-ANALYZE-LOAD-ANALYZE)
 - Each task specifies exactly ONE tool
 - Enables single-tool isolation in execution
+- INTELLIGENT SHORTCUT: Skips downloads for pure statistical queries
 """
 
 import logging
@@ -84,24 +85,49 @@ class ExecutionPlanner:
         logger.info("ExecutionPlanner initialized")
     
     def generate_task_queue(self, parsed_query: ParsedQuery, 
-                           data_report: DataRealityReport) -> TaskQueue:
+                            data_report: DataRealityReport) -> TaskQueue:
         """
-        Generate a complete task queue from a parsed query.
-        
-        Args:
-            parsed_query: Structured query from the parser
-            data_report: Data availability report from DataScout
-            
-        Returns:
-            TaskQueue with ordered list of tasks
+        Generate a complete task queue.
+        Includes STATISTICAL SHORTCUT to prevent massive downloads for simple questions.
         """
         logger.info(f"🎯 Planning task queue for: {parsed_query.target} in {parsed_query.location}")
         
-        self.task_counter = 0  # Reset counter
+        self.task_counter = 0
         tasks: List[ExecutionTask] = []
         
         # Analyze requirements
         requirements = self._analyze_requirements(parsed_query)
+        
+        # === INTELLIGENT SHORTCUT: PURE COUNTING ===
+        # If user asks "How many?" (summary_required) AND we don't need spatial math
+        if parsed_query.summary_required and not requirements['needs_spatial_analysis']:
+            
+            # Find count in report
+            target_count = 0
+            for probe in data_report.probe_results:
+                if parsed_query.target.lower() in probe.original_entity.lower():
+                    target_count = probe.count
+                    if target_count > 0: break
+            
+            logger.info(f"⚡ SHORTCUT: Statistical query detected. Found count {target_count}.")
+            
+            finish_task = ExecutionTask(
+                id="task_1",
+                task_type=TaskType.FINISH,
+                tool_name="finish_task",
+                instruction=f"Answer the user directly using the probe data.",
+                parameters_hint={
+                    "final_layer_name": "N/A (Statistical Result)",
+                    "reason": f"According to OpenStreetMap, there are {target_count} named {parsed_query.target}s in {parsed_query.location}."
+                }
+            )
+            
+            return TaskQueue(
+                tasks=[finish_task],
+                original_query=f"Count {parsed_query.target}",
+                requirements=requirements
+            )
+        # ===========================================
         
         # Step 1: Load primary target data
         primary_task = self._create_load_task(
@@ -281,16 +307,11 @@ class ExecutionPlanner:
                 logger.info(f"  ✅ {buffer_task.id}: Buffer {constraint.feature_type} by {distance}m")
                 
                 # Spatial join primary target with buffered constraint
-                # Get primary layer name from the first task
-                if i == 0:
-                    primary_layer = f"{constraints[0].feature_type.split()[0].lower()}_{location.lower().replace(' ', '_').replace(',', '')}"
-                
                 # Reference the primary task's output using its ID directly
-                # The executor's _resolve_task_parameters expects format: [task_id]
-                primary_layer_ref = f"[{primary_task_id}]"  # Robust: works with any ID format
+                primary_layer_ref = f"[{primary_task_id}]"
                 
                 join_task = self._create_spatial_join_task(
-                    left_layer=primary_layer_ref,  # This will be resolved during execution
+                    left_layer=primary_layer_ref,
                     right_layer=buffer_task.output_layer_name,
                     depends_on_ids=[primary_task_id, buffer_task.id],
                     predicate="intersects"
