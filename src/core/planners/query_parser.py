@@ -56,6 +56,95 @@ class ParsedQuery(BaseModel):
         if v is None:
             return []
         return v
+    
+    @field_validator('location', mode='before')
+    @classmethod
+    def normalize_location(cls, v):
+        """
+        Normalize location strings to help with geocoding.
+        E.g., "Westbengal" -> "West Bengal" for better Nominatim matching
+        This is backwards-compatible - already-correct locations pass through unchanged.
+        """
+        if not v:
+            return v
+        
+        # Common location fixes (handles typos, missing spaces, shorthand)
+        fixes = {
+            # India
+            "westbengal": "West Bengal",
+            "west bengal": "West Bengal",
+            "westbengal, india": "West Bengal, India",
+            "west bengal, india": "West Bengal, India",
+            "maharashtra": "Maharashtra",
+            "karnataka": "Karnataka",
+            "tamilnadu": "Tamil Nadu",
+            "tamil nadu": "Tamil Nadu",
+            "uttarpradesh": "Uttar Pradesh",
+            "uttar pradesh": "Uttar Pradesh",
+            "rajasthan": "Rajasthan",
+            
+            # Major Indian Cities
+            "mumbai": "Mumbai, India",
+            "delhi": "Delhi, India",
+            "bangalore": "Bangalore, India",
+            "bengaluru": "Bangalore, India",
+            "kolkata": "Kolkata, India",
+            "pune": "Pune, India",
+            "hyderabad": "Hyderabad, India",
+            "jaipur": "Jaipur, India",
+            "ahmedabad": "Ahmedabad, India",
+            "lucknow": "Lucknow, India",
+            
+            # UK & Europe (Central/West variants)
+            "london": "London, UK",
+            "central london": "London, UK",
+            "west london": "London, UK",
+            "east london": "London, UK",
+            "paris": "Paris, France",
+            "central paris": "Paris, France",
+            "berlin": "Berlin, Germany",
+            "central berlin": "Berlin, Germany",
+            "amsterdam": "Amsterdam, Netherlands",
+            "prague": "Prague, Czech Republic",
+            "budapest": "Budapest, Hungary",
+            
+            # USA
+            "newyork": "New York, USA",
+            "new york": "New York, USA",
+            "nyc": "New York, USA",
+            "losangeles": "Los Angeles, USA",
+            "los angeles": "Los Angeles, USA",
+            "sanfrancisco": "San Francisco, USA",
+            "san francisco": "San Francisco, USA",
+            "chicago": "Chicago, USA",
+            "boston": "Boston, USA",
+            "seattle": "Seattle, USA",
+            "denver": "Denver, USA",
+            
+            # Asia
+            "tokyo": "Tokyo, Japan",
+            "bangkok": "Bangkok, Thailand",
+            "singapore": "Singapore",
+            "hongkong": "Hong Kong",
+            "hong kong": "Hong Kong",
+            "shanghai": "Shanghai, China",
+            "beijing": "Beijing, China",
+            "seoul": "Seoul, South Korea",
+            
+            # Australia
+            "sydney": "Sydney, Australia",
+            "melbourne": "Melbourne, Australia",
+            "brisbane": "Brisbane, Australia",
+            "perth": "Perth, Australia"
+        }
+        
+        v_lower = str(v).lower().strip()
+        if v_lower in fixes:
+            normalized = fixes[v_lower]
+            logger.debug(f"Location normalized: '{v}' → '{normalized}'")
+            return normalized
+        
+        return v
 
 
 # --- Real LLM Caller (Unchanged) ---

@@ -109,24 +109,31 @@ class ExecutionPlanner:
                     target_count = probe.count
                     if target_count > 0: break
             
-            logger.info(f"⚡ SHORTCUT: Statistical query detected. Found count {target_count}.")
+            # Increase threshold to 10,000 so moderate result sets (like 1,465 lakes) get a map
+            SAFETY_THRESHOLD = 10000
+            is_massive = target_count > SAFETY_THRESHOLD
             
-            finish_task = ExecutionTask(
-                id="task_1",
-                task_type=TaskType.FINISH,
-                tool_name="finish_task",
-                instruction=f"Answer the user directly using the probe data.",
-                parameters_hint={
-                    "final_layer_name": "N/A (Statistical Result)",
-                    "reason": f"According to OpenStreetMap, there are {target_count} named {parsed_query.target}s in {parsed_query.location}."
-                }
-            )
-            
-            return TaskQueue(
-                tasks=[finish_task],
-                original_query=f"Count {parsed_query.target}",
-                requirements=requirements
-            )
+            if not is_massive:
+                logger.info(f"⚡ SHORTCUT: Statistical query detected. Found count {target_count}.")
+                
+                finish_task = ExecutionTask(
+                    id="task_1",
+                    task_type=TaskType.FINISH,
+                    tool_name="finish_task",
+                    instruction=f"Answer the user directly using the probe data.",
+                    parameters_hint={
+                        "final_layer_name": "N/A (Statistical Result)",
+                        "reason": f"According to OpenStreetMap, there are {target_count} named {parsed_query.target}s in {parsed_query.location}."
+                    }
+                )
+                
+                return TaskQueue(
+                    tasks=[finish_task],
+                    original_query=f"Count {parsed_query.target}",
+                    requirements=requirements
+                )
+            else:
+                logger.info(f"ℹ️ Result set {target_count} exceeds threshold {SAFETY_THRESHOLD}. Generating map instead of shortcut.")
         # ===========================================
         
         # Step 1: Load primary target data

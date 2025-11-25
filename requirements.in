@@ -30,6 +30,8 @@ geopy
 # --- Frontend & Visualization ---
 streamlit
 folium
+streamlit-folium
+mapclassify
 
 # --- Infrastructure & Monitoring ---
 prometheus-client

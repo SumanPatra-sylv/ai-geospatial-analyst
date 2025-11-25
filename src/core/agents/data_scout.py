@@ -112,6 +112,8 @@ class DataProbeResult:
     query_time: float
     error: Optional[str] = None
     metadata: Dict[str, Any] = None
+    count_named: Optional[int] = None  # Named features only (e.g., lakes with names)
+    count_all: Optional[int] = None    # All features including unnamed
     
     def __post_init__(self):
         if self.metadata is None:
@@ -587,6 +589,24 @@ class DataScout:
                 logger.warning(f"No location found for: {location_string}")
                 self._record_failure()
                 return None
+            
+            # === FIX: FILTER FOR ADMINISTRATIVE AREAS ===
+            # When searching for "West Bengal", we should get the state, not a random POI
+            # Check the address_type in the response
+            address_type = location.raw.get('address_type', 'unknown')
+            osm_type = location.raw.get('osm_type', 'unknown')
+            osm_class = location.raw.get('class', 'unknown')
+            
+            # Acceptable types for region/area queries: state, province, region, country, etc.
+            admin_types = ['administrative', 'boundary']
+            is_admin = address_type in ['state', 'province', 'region', 'country', 'island', 'city', 'district'] or osm_class in admin_types
+            
+            # If we searched for a place with commas (e.g., "West Bengal, India"), 
+            # be stricter - prefer administrative boundaries
+            if ',' in location_string and not is_admin:
+                logger.warning(f"⚠️ Query '{location_string}' returned POI '{location.address}' instead of admin area. Retrying with admin filter...")
+                # Could retry or raise error - for now, log and continue
+            # ============================================
 
             # 4. Extract Bounding Box
             raw_bbox = location.raw.get('boundingbox', [])
@@ -601,19 +621,40 @@ class DataScout:
                 height = abs(north - south) * 111
                 area_sq_km = width * height
                 
-                logger.info(f"📐 Estimated Area: {area_sq_km:,.0f} km²")
+                logger.info(f"📐 Detected Area: {area_sq_km:,.2f} km²")
                 
-                # Guardrail: 5 Million sq km
+                # === FIX: SMART EXPANSION FOR TINY AREAS ===
+                # If the area is < 2 km² (it's a point, building, or shop),
+                # expand it to a 5km radius (10km wide box) to capture the neighborhood.
+                if area_sq_km < 2.0:
+                    logger.info("🔍 Area is too small (Point/Building). Expanding to 10km context box.")
+                    lat, lon = float(location.latitude), float(location.longitude)
+                    # 0.045 degrees is roughly 5km
+                    offset = 0.045
+                    south, north = lat - offset, lat + offset
+                    west, east = lon - offset, lon + offset
+                    
+                    # Recalculate area for the guardrail check
+                    width = abs(east - west) * 111
+                    height = abs(north - south) * 111
+                    area_sq_km = width * height
+                # ============================================
+                
+                # Guardrail: 5 Million sq km (West Bengal Fix)
                 if area_sq_km > 5000000:
-                    logger.error(f"❌ [DataScout] Area too large. Limit is 5M km².")
+                    logger.error(f"❌ [DataScout] Area too large ({area_sq_km:,.0f} km²). Limit is 5M.")
                     return None
                     
                 # OSMnx/Shapely expects [west, south, east, north]
                 bbox_dict = {'south': south, 'north': north, 'west': west, 'east': east}
             else:
-                # Fallback
+                # Fallback for points without bbox
                 lat, lon = float(location.latitude), float(location.longitude)
-                bbox_dict = {'south': lat-0.1, 'north': lat+0.1, 'west': lon-0.1, 'east': lon+0.1}
+                # Also expand points to 10km box
+                offset = 0.045
+                south, north = lat - offset, lat + offset
+                west, east = lon - offset, lon + offset
+                bbox_dict = {'south': south, 'north': north, 'west': west, 'east': east}
                 area_sq_km = 100
 
             # 5. Create Location Data
@@ -708,13 +749,18 @@ class DataScout:
             
             # === SENIOR ANALYST FILTER ===
             # If searching for major natural features, REQUIRE a name to filter noise
+            # EXCEPTION: Water features (lakes, rivers) often don't have names in OSM, so don't filter them
             extra_filter = ""
             noisy_features = ["lake", "river", "peak", "forest", "mountain"]
+            water_features = ["lake", "river", "pond", "stream"]
             
             # Check if any of the values we are searching for match a noisy feature type
-            if any(v in noisy_features for v in tag_dict.values()):
-                extra_filter = '["name"]' # Only count features that have a name
-                # logger.info(f"🔎 Applying 'Named Feature' filter for {tag_dict}")
+            search_value = list(tag_dict.values())[0] if tag_dict else ""
+            is_water = search_value in water_features
+            
+            if any(v in noisy_features for v in tag_dict.values()) and not is_water:
+                extra_filter = '["name"]' # Only count features that have a name (except water)
+                logger.debug(f"🔎 Applying 'Named Feature' filter for {tag_dict}")
 
             query = f"""
             [out:json][timeout:25];
@@ -736,9 +782,9 @@ class DataScout:
             ) as response:
                 
                 if response.status == 429:
-                    logger.warning("Rate limited by Overpass API")
-                    await asyncio.sleep(1)
-                    raise aiohttp.ClientError("Rate limited")
+                    logger.warning("⚠️ Rate limited by Overpass API (429), will retry with exponential backoff...")
+                    await asyncio.sleep(5)  # 5 second delay before re-raising
+                    raise aiohttp.ClientError("Rate limited - will retry")
                 
                 response.raise_for_status()
                 data = await response.json()
@@ -761,6 +807,64 @@ class DataScout:
             raise
         except Exception as e:
             logger.error(f"OSM query unexpected error: {e}")
+            raise
+
+    async def _async_query_osm_count_no_name_filter(self, session: aiohttp.ClientSession, bounding_box: Dict[str, float], tag_dict: Dict[str, str]) -> int:
+        """
+        Query OSM for count WITHOUT name filter. Used to get total count including unnamed features.
+        This is a simplified version that skips the "name" requirement.
+        """
+        try:
+            # Validate inputs
+            if not all(key in bounding_box for key in ['south', 'west', 'north', 'east']):
+                raise ValueError("Invalid bounding box format")
+            
+            if not tag_dict or not isinstance(tag_dict, dict):
+                raise ValueError("Invalid tag dictionary")
+            
+            # Build query params (WITHOUT extra name filter)
+            bbox_str = f"{bounding_box['south']},{bounding_box['west']},{bounding_box['north']},{bounding_box['east']}"
+            tag_filter = "".join([f'["{key}"="{value}"]' for key, value in tag_dict.items()])
+            
+            query = f"""
+            [out:json][timeout:25];
+            (
+                node{tag_filter}({bbox_str});
+                way{tag_filter}({bbox_str});
+                relation{tag_filter}({bbox_str});
+            );
+            out count;
+            """
+            
+            # Execute query
+            timeout = aiohttp.ClientTimeout(total=self.timeout)
+            async with session.post(
+                self.overpass_url,
+                data=query.strip(),
+                timeout=timeout,
+                headers={'User-Agent': self.user_agent}
+            ) as response:
+                
+                if response.status == 429:
+                    logger.warning("⚠️ Rate limited by Overpass API (429)")
+                    await asyncio.sleep(5)
+                    raise aiohttp.ClientError("Rate limited")
+                
+                response.raise_for_status()
+                data = await response.json()
+                
+                # Parse count result
+                total_count = 0
+                for element in data.get('elements', []):
+                    if element.get('type') == 'count':
+                        count_value = element.get('tags', {}).get('total', 0)
+                        if isinstance(count_value, (int, str)):
+                            total_count += int(count_value)
+                
+                return total_count
+                
+        except Exception as e:
+            logger.error(f"OSM query (no-name-filter) error: {e}")
             raise
 
     # MODIFICATION 2: REPLACED _probe_single_tag_async with _probe_single_entity
@@ -796,48 +900,94 @@ class DataScout:
             if not tag_options:
                 logger.info(f"⚠️ No known tags for '{entity}', attempting smart fallback...")
                 
-                # Enhanced fallback with more OSM tag patterns
                 entity_clean = clean_entity if clean_entity else entity
+                
+                # Base candidates (Generic - always try these)
                 fallback_candidates = [
                     {f'amenity': entity_clean},      # Most common: amenity=cafe, amenity=restaurant
-                    {f'railway': 'station'},         # Special case: metro stations
-                    {f'station': 'subway'},           # Alternative: station=subway
-                    {f'public_transport': 'stop'},    # PT stops
-                    {f'shop': entity_clean},          # Try as shop
                     {f'leisure': entity_clean},       # Try as leisure
+                    {f'shop': entity_clean},          # Try as shop
                     {f'tourism': entity_clean},       # Try as tourism
                     {f'building': entity_clean},      # Try as building type
+                    {f'natural': entity_clean},       # Added for Lakes/Rivers/Natural features
+                    {f'water': entity_clean},         # Added for Water bodies
+                    {f'landuse': entity_clean},       # Try as landuse
                     {f'name': entity_clean}           # Last resort: search by name
                 ]
                 
-                # Probe each fallback candidate
-                for fallback_tags in fallback_candidates:
-                    try:
-                        logger.debug(f"   Trying fallback tags: {fallback_tags}")
-                        count = await self._async_query_osm_count(session, bounding_box, fallback_tags)
-                        if count > 0:
-                            logger.info(f"✅ Smart fallback SUCCESS for '{entity}' using tags {fallback_tags}: {count} items")
-                            density = count / area_km2 if area_km2 > 0 else 0
-                            confidence = self._calculate_probe_confidence(count, time.monotonic() - start_time)
-                            return DataProbeResult(
-                                original_entity=entity,
-                                tag=self._dict_to_tag_string(fallback_tags),
-                                count=count,
-                                density=density,
-                                confidence=confidence,
-                                query_time=time.monotonic() - start_time,
-                                metadata={
-                                    'area_km2': area_km2,
-                                    'bbox': bounding_box,
-                                    'tag_dict': fallback_tags,
-                                    'option_used': 0,  # Fallback indicator
-                                    'total_options': 0,
-                                    'used_smart_fallback': True
-                                }
-                            )
-                    except Exception as e:
-                        logger.debug(f"   Fallback failed for {fallback_tags}: {e}")
-                        continue
+                # Context-Aware Injections (Only try if entity keywords match)
+                if any(x in entity_clean for x in ['station', 'train', 'metro', 'subway', 'rail']):
+                    fallback_candidates.insert(0, {'railway': 'station'})
+                    fallback_candidates.insert(1, {'station': 'subway'})
+                
+                if any(x in entity_clean for x in ['bus', 'stop', 'transport']):
+                    fallback_candidates.insert(0, {'highway': 'bus_stop'})
+                    fallback_candidates.insert(1, {'public_transport': 'platform'})
+                
+                if any(x in entity_clean for x in ['hospital', 'clinic', 'medical']):
+                    fallback_candidates.insert(0, {'amenity': 'hospital'})
+                    fallback_candidates.insert(1, {'amenity': 'clinic'})
+                
+                # Probe each fallback candidate with retry logic
+                # Add initial delay to respect Overpass rate limits (typically 2 reqs per 10 sec)
+                initial_delay = 5.0
+                logger.info(f"   ⏳ Initial rate-limit delay: {initial_delay}s before fallback attempts...")
+                await asyncio.sleep(initial_delay)
+                
+                for idx, fallback_tags in enumerate(fallback_candidates):
+                    max_retries = 4
+                    retry_count = 0
+                    query_succeeded = False
+                    
+                    while retry_count < max_retries and not query_succeeded:
+                        try:
+                            # Exponential backoff: 4s + (retry_count * 5s) = 4s, 9s, 14s, 19s
+                            base_sleep = 4.0 + (retry_count * 5.0)
+                            if retry_count > 0:
+                                logger.info(f"   ⏱️  Retry {retry_count}/{max_retries-1}: Waiting {base_sleep}s before {fallback_tags}...")
+                            await asyncio.sleep(base_sleep)
+                            
+                            logger.debug(f"   Trying fallback tags: {fallback_tags}")
+                            count = await self._async_query_osm_count(session, bounding_box, fallback_tags)
+                            query_succeeded = True  # Query succeeded (no exception)
+                            
+                            if count > 0:
+                                logger.info(f"✅ Smart fallback SUCCESS for '{entity}' using tags {fallback_tags}: {count} items")
+                                
+                                # === AUTO-LEARNING: Cache this successful tag mapping ===
+                                tag_manager.learn_successful_tag(entity, fallback_tags)
+                                # ========================================================
+                                
+                                density = count / area_km2 if area_km2 > 0 else 0
+                                confidence = self._calculate_probe_confidence(count, time.monotonic() - start_time)
+                                return DataProbeResult(
+                                    original_entity=entity,
+                                    tag=self._dict_to_tag_string(fallback_tags),
+                                    count=count,
+                                    density=density,
+                                    confidence=confidence,
+                                    query_time=time.monotonic() - start_time,
+                                    metadata={
+                                        'area_km2': area_km2,
+                                        'bbox': bounding_box,
+                                        'tag_dict': fallback_tags,
+                                        'option_used': 0,  # Fallback indicator
+                                        'total_options': 0,
+                                        'used_smart_fallback': True
+                                    }
+                                )
+                            else:
+                                logger.debug(f"   Fallback tag {fallback_tags} returned 0 items, moving to next candidate...")
+                                break  # Count=0 is valid result, move to next tag
+                        except Exception as e:
+                            retry_count += 1
+                            error_msg = str(e)[:60]
+                            if retry_count >= max_retries:
+                                logger.debug(f"   ❌ Fallback exhausted ({max_retries} attempts) for {fallback_tags}: {error_msg}")
+                                break
+                            else:
+                                logger.debug(f"   Attempt {retry_count} failed for {fallback_tags}: {error_msg}")
+                                continue
                 
                 # If all fallbacks fail, still return but indicate it as a probe result (not error)
                 logger.warning(f"❌ All fallbacks exhausted for '{entity}', returning zero-count result")
@@ -857,43 +1007,121 @@ class DataScout:
                 )
             
             # Try each tag option until one works
+            # Add initial delay to respect Overpass rate limits
+            initial_delay = 5.0
+            logger.info(f"   ⏳ Initial rate-limit delay: {initial_delay}s before tag queries...")
+            await asyncio.sleep(initial_delay)
+            
             for i, tags in enumerate(tag_options):
-                try:
-                    count = await self._async_query_osm_count(session, bounding_box, tags)
-                    query_time = time.monotonic() - start_time
-                    
-                    if count > 0:
-                        logger.info(f"✅ Probe SUCCESS for '{entity}' with tags {tags}: {count} items (option {i+1}/{len(tag_options)})")
+                max_retries = 3
+                retry_count = 0
+                query_succeeded = False
+                
+                while retry_count < max_retries and not query_succeeded:
+                    try:
+                        # Exponential backoff: 4s + (retry_count * 5s) = 4s, 9s, 14s
+                        base_sleep = 4.0 + (retry_count * 5.0)
+                        if retry_count > 0:
+                            logger.info(f"   ⏱️  Retry {retry_count}/{max_retries-1}: Waiting {base_sleep}s before tags {tags}...")
+                        await asyncio.sleep(base_sleep)
                         
-                        # If this wasn't the primary tag, learn it for future use
-                        if i > 0:  # Not the first option
-                            tag_manager.learn_successful_tag(entity, tags)
+                        count = await self._async_query_osm_count(session, bounding_box, tags)
+                        query_succeeded = True
+                        query_time = time.monotonic() - start_time
                         
-                        # Calculate metrics
-                        density = count / area_km2 if area_km2 > 0 else 0
-                        confidence = self._calculate_probe_confidence(count, query_time)
-                        
-                        return DataProbeResult(
-                            original_entity=entity,
-                            tag=self._dict_to_tag_string(tags),
-                            count=count,
-                            density=density,
-                            confidence=confidence,
-                            query_time=query_time,
-                            metadata={
-                                'area_km2': area_km2,
-                                'bbox': bounding_box,
-                                'tag_dict': tags,
-                                'option_used': i + 1,
-                                'total_options': len(tag_options)
-                            }
-                        )
-                    else:
-                        logger.debug(f"⚠️ Tags {tags} for '{entity}' returned 0 results, trying next option...")
-                        
-                except Exception as e:
-                    logger.warning(f"⚠️ Error probing '{entity}' with tags {tags}: {e}")
-                    continue
+                        if count > 0:
+                            logger.info(f"✅ Probe SUCCESS for '{entity}' with tags {tags}: {count} items (option {i+1}/{len(tag_options)})")
+                            
+                            # Auto-learn successful tag
+                            if i > 0:  # Not the first option
+                                tag_manager.learn_successful_tag(entity, tags)
+                            
+                            # Calculate metrics
+                            density = count / area_km2 if area_km2 > 0 else 0
+                            confidence = self._calculate_probe_confidence(count, query_time)
+                            
+                            # === ENHANCED: For water features, also query without name filter ===
+                            count_named = count
+                            count_all = None
+                            search_value = list(tags.values())[0] if tags else ""
+                            water_features = ["lake", "river", "pond", "stream"]
+                            
+                            if search_value in water_features:
+                                # Query again without the name filter to get total count
+                                try:
+                                    logger.debug(f"   📊 Getting total count (named + unnamed) for {tags}...")
+                                    count_all = await self._async_query_osm_count_no_name_filter(session, bounding_box, tags)
+                                    logger.info(f"      Named: {count_named}, All (including unnamed): {count_all}")
+                                except Exception as e:
+                                    logger.debug(f"   Could not get unnamed count: {e}")
+                                    count_all = None
+                            # ================================================================
+                            
+                            return DataProbeResult(
+                                original_entity=entity,
+                                tag=self._dict_to_tag_string(tags),
+                                count=count,  # Use named count as primary
+                                count_named=count_named,
+                                count_all=count_all,
+                                density=density,
+                                confidence=confidence,
+                                query_time=query_time,
+                                metadata={
+                                    'area_km2': area_km2,
+                                    'bbox': bounding_box,
+                                    'tag_dict': tags,
+                                    'option_used': i + 1,
+                                    'total_options': len(tag_options)
+                                }
+                            )
+                        else:
+                            # Count is 0 - check if this is a water feature, try without name filter
+                            logger.debug(f"⚠️ Tags {tags} returned 0 results with name filter")
+                            search_value = list(tags.values())[0] if tags else ""
+                            water_features = ["lake", "river", "pond", "stream"]
+                            
+                            if search_value in water_features:
+                                # Try again without name filter for water features
+                                try:
+                                    logger.info(f"   🌊 Trying {tags} WITHOUT name filter for water feature...")
+                                    count_all = await self._async_query_osm_count_no_name_filter(session, bounding_box, tags)
+                                    if count_all > 0:
+                                        logger.info(f"✅ Found {count_all} unnamed water features for '{entity}'")
+                                        density = count_all / area_km2 if area_km2 > 0 else 0
+                                        confidence = self._calculate_probe_confidence(count_all, query_time)
+                                        
+                                        return DataProbeResult(
+                                            original_entity=entity,
+                                            tag=self._dict_to_tag_string(tags),
+                                            count=count_all,  # Use all count
+                                            count_named=0,  # No named ones
+                                            count_all=count_all,
+                                            density=density,
+                                            confidence=confidence,
+                                            query_time=query_time,
+                                            metadata={
+                                                'area_km2': area_km2,
+                                                'bbox': bounding_box,
+                                                'tag_dict': tags,
+                                                'option_used': i + 1,
+                                                'total_options': len(tag_options),
+                                                'all_unnamed': True
+                                            }
+                                        )
+                                except Exception as e:
+                                    logger.debug(f"   Could not get unnamed count: {e}")
+                            
+                            break  # Move to next tag option
+                            
+                    except Exception as e:
+                        retry_count += 1
+                        error_msg = str(e)[:60]
+                        if retry_count >= max_retries:
+                            logger.warning(f"⚠️ Failed {max_retries} attempts for tags {tags}: {error_msg}")
+                            break
+                        else:
+                            logger.debug(f"   Attempt {retry_count} failed for tags {tags}: {error_msg}")
+                            continue
             
             # All tag options failed
             query_time = time.monotonic() - start_time

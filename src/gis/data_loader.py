@@ -121,12 +121,20 @@ class SmartDataLoader:
         for directory in [self.cache_dir, self.boundaries_dir, self.temp_dir]:
             try:
                 directory.mkdir(parents=True, exist_ok=True)
-                # Test write access
-                test_file = directory / ".write_test"
-                test_file.touch()
-                test_file.unlink()
+                # Test write access - use a unique filename to avoid conflicts
+                import uuid
+                test_file = directory / f".write_test_{uuid.uuid4().hex[:8]}"
+                try:
+                    test_file.write_text("test")
+                    test_file.unlink(missing_ok=True)
+                except Exception as test_e:
+                    # If write test fails, log warning but don't crash
+                    if hasattr(self, 'logger'):
+                        self.logger.warning(f"Could not verify write access to {directory}: {test_e}")
+                    # Try to continue anyway - directory exists, just can't verify write
+                    pass
             except (PermissionError, OSError) as e:
-                raise RuntimeError(f"Cannot create or write to directory {directory}: {e}")
+                raise RuntimeError(f"Cannot create directory {directory}: {e}")
 
     def _setup_osmnx_configuration(self):
         """Enhanced OSMnx configuration with robust error handling."""

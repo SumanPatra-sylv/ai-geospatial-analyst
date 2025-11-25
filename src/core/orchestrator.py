@@ -471,6 +471,10 @@ class MasterOrchestrator:
             # Update orchestrator state
             self.data_layers = result["final_layers"]
             
+            # Extract finish_task's parameters_hint for UI consumption
+            finish_task = next((t for t in task_queue.tasks if t.tool_name == "finish_task"), None)
+            finish_task_parameters_hint = finish_task.parameters_hint if finish_task else {}
+            
         except Exception as e:
             print(f"❌ Task queue execution failed: {e}")
             traceback.print_exc()
@@ -529,6 +533,9 @@ class MasterOrchestrator:
                 "validation_failures": self.validation_failures,
                 "validation_enabled": True
             },
+            
+            # === STREAMLIT UI FIX: Pass finish_task parameters_hint for count extraction ===
+            "parameters_hint": finish_task_parameters_hint,
             
             # Architecture metadata
             "architecture": "task_queue",

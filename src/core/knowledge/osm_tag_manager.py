@@ -33,7 +33,12 @@ class OSMTagManager:
             "supermarket": {"shop": "supermarket"},
             "church": {"amenity": "place_of_worship"},
             "cemetery": {"landuse": "cemetery"},
-            "university": {"amenity": "university"}
+            "university": {"amenity": "university"},
+            "lake": {"water": "lake"},  # ✅ Added: Common natural feature
+            "river": {"waterway": "river"},  # ✅ Added: Common natural feature
+            "forest": {"natural": "forest"},  # ✅ Added: Common natural feature
+            "mountain": {"natural": "peak"},  # ✅ Added: Common natural feature
+            "pond": {"water": "pond"}  # ✅ Added: Common natural feature
         }
     
     def _load_alternative_tags(self) -> Dict[str, List[Dict[str, str]]]:
