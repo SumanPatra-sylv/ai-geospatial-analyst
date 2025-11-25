@@ -38,7 +38,10 @@ class OSMTagManager:
             "river": {"waterway": "river"},  # ✅ Added: Common natural feature
             "forest": {"natural": "forest"},  # ✅ Added: Common natural feature
             "mountain": {"natural": "peak"},  # ✅ Added: Common natural feature
-            "pond": {"water": "pond"}  # ✅ Added: Common natural feature
+            "pond": {"water": "pond"},  # ✅ Added: Common natural feature
+            "drinking_fountain": {"amenity": "drinking_water"},  # ✅ Added: Water access point
+            "drinking_water": {"amenity": "drinking_water"},  # ✅ Alternative spelling
+            "water_fountain": {"amenity": "drinking_water"}  # ✅ Alternative naming
         }
     
     def _load_alternative_tags(self) -> Dict[str, List[Dict[str, str]]]:

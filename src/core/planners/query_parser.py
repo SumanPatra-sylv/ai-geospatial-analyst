@@ -9,7 +9,7 @@ spatial analysis requests using Pydantic models and a real LLM-based extraction.
 import json
 import logging
 from enum import Enum
-from typing import List, Optional
+from typing import List, Optional, Union
 import os
 import jinja2
 import requests
@@ -43,6 +43,24 @@ class ParsedQuery(BaseModel):
     constraints: Optional[List[SpatialConstraint]] = Field(default=None, description="Optional list of spatial constraints")
     # This field is new, added to match the upgraded prompt
     summary_required: bool = Field(..., description="True if the user asks for a summary, count, or list")
+
+    @field_validator('target', mode='before')
+    @classmethod
+    def normalize_target(cls, v):
+        """
+        ENHANCEMENT: Support multi-target queries by converting lists to comma-separated string.
+        E.g., ["hospital", "metro_station", "drinking_fountain"] -> "hospital, metro_station, drinking_fountain"
+        
+        This allows the LLM to extract multiple targets, which we then process as a unified query.
+        Single targets pass through unchanged.
+        """
+        if isinstance(v, list):
+            # Join multiple targets with comma for unified processing
+            return ', '.join([str(item).strip() for item in v])
+        elif isinstance(v, str):
+            return v.strip()
+        else:
+            return str(v).strip()
 
     @field_validator('constraints', mode='before')
     @classmethod

@@ -8,5 +8,30 @@
     {
       "building": "school"
     }
+  ],
+  "metro_station": [
+    {
+      "railway": "station"
+    }
+  ],
+  "cinema": [
+    {
+      "amenity": "cinema"
+    }
+  ],
+  "metro station": [
+    {
+      "railway": "station"
+    }
+  ],
+  "hospital, school, pharmacy": [
+    {
+      "amenity": "hospital"
+    }
+  ],
+  "helipad": [
+    {
+      "aeroway": "helipad"
+    }
   ]
 }

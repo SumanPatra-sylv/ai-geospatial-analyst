@@ -495,6 +495,29 @@ class MasterOrchestrator:
                 )
             except Exception as e:
                 print(f"⚠️  Could not store pattern: {e}")
+            
+            # === ENHANCED: Tag Learning Summary (Metadata-Based) ===
+            print("\n📚 Tag Learning Summary:")
+            if context and 'data_report' in context:
+                for res in context['data_report'].probe_results:
+                    if res.error:
+                        continue
+                    
+                    # Extract metadata safely
+                    source_type = res.metadata.get('tag_source', 'unknown') if res.metadata else 'unknown'
+                    tag_dict = res.metadata.get('tag_dict', {}) if res.metadata else {}
+                    
+                    if source_type == 'verified_primary':
+                        print(f"   ✅ {res.original_entity}: Primary tag {tag_dict} (Verified)")
+                    elif source_type == 'learned_fallback':
+                        option_used = res.metadata.get('option_used', '?') if res.metadata else '?'
+                        total_options = res.metadata.get('total_options', '?') if res.metadata else '?'
+                        print(f"   🔄 {res.original_entity}: Fallback tag {tag_dict} (Learned, option {option_used}/{total_options})")
+                    elif res.metadata and res.metadata.get('used_smart_fallback'):
+                        print(f"   🧠 {res.original_entity}: Smart Fallback {tag_dict} (AI Derived)")
+                    else:
+                        print(f"   ℹ️  {res.original_entity}: {tag_dict}")
+            # ================================================================
         
         # === COMPATIBILITY FIX: Return full dictionary expected by test code ===
         return {

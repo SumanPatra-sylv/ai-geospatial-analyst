@@ -889,6 +889,11 @@ class DataScout:
             if clean_entity.endswith('s') and not clean_entity.endswith('ss'):
                 clean_entity = clean_entity[:-1]
             
+            # === FIX 3: SPACE NORMALIZATION ===
+            # Convert spaces to underscores for OSM compatibility
+            # E.g., "drinking fountain" -> "drinking_fountain", "metro station" -> "metro_station"
+            clean_entity = clean_entity.replace(' ', '_')
+            
             # 1. Try tags for the CLEAN (singular) entity first
             tag_options = tag_manager.get_all_tag_options(clean_entity)
             
@@ -989,8 +994,49 @@ class DataScout:
                                 logger.debug(f"   Attempt {retry_count} failed for {fallback_tags}: {error_msg}")
                                 continue
                 
-                # If all fallbacks fail, still return but indicate it as a probe result (not error)
-                logger.warning(f"❌ All fallbacks exhausted for '{entity}', returning zero-count result")
+                # === SUPERPOWER: EXTERNAL API FALLBACK (The "TagInfo" Safety Net) ===
+                # Last resort before giving up - query the official OSM TagInfo API
+                logger.info(f"🌐 Smart fallback candidates exhausted. Querying TagInfo API for '{entity_clean}'...")
+                try:
+                    api_tags = self.resolve_tag_from_taginfo_api(entity_clean)
+                    
+                    if api_tags:
+                        logger.info(f"🌐 TagInfo API suggested: {api_tags}. Probing...")
+                        
+                        count = await self._async_query_osm_count(session, bounding_box, api_tags)
+                        if count > 0:
+                            logger.info(f"✅ TagInfo SUCCESS for '{entity}' using {api_tags}: {count} items")
+                            
+                            # Learn this discovery for future use
+                            tag_manager.learn_successful_tag(entity_clean, api_tags)
+                            
+                            density = count / area_km2 if area_km2 > 0 else 0
+                            confidence = self._calculate_probe_confidence(count, time.monotonic() - start_time)
+                            
+                            return DataProbeResult(
+                                original_entity=entity,
+                                tag=self._dict_to_tag_string(api_tags),
+                                count=count,
+                                density=density,
+                                confidence=confidence,
+                                query_time=time.monotonic() - start_time,
+                                metadata={
+                                    'area_km2': area_km2,
+                                    'bbox': bounding_box,
+                                    'tag_dict': api_tags,
+                                    'tag_source': 'taginfo_api',
+                                    'used_smart_fallback': True,
+                                    'fallback_reason': 'taginfo_api_discovery'
+                                }
+                            )
+                        else:
+                            logger.debug(f"   TagInfo API tag {api_tags} returned 0 items")
+                except Exception as e:
+                    logger.warning(f"🌐 TagInfo API lookup failed for '{entity_clean}': {e}")
+                # ===================================================================
+                
+                # If all fallbacks AND API fail, still return but indicate it as a probe result (not error)
+                logger.warning(f"❌ All fallbacks (including TagInfo API) exhausted for '{entity}', returning zero-count result")
                 return DataProbeResult(
                     original_entity=entity,
                     tag="search_by_name",
@@ -1032,9 +1078,20 @@ class DataScout:
                         if count > 0:
                             logger.info(f"✅ Probe SUCCESS for '{entity}' with tags {tags}: {count} items (option {i+1}/{len(tag_options)})")
                             
-                            # Auto-learn successful tag
-                            if i > 0:  # Not the first option
+                            # === ENHANCED: Tag Source Tracking (Metadata-Based) ===
+                            if i == 0:
+                                # Index 0 = Primary tag (already known to be good)
+                                tag_source = "verified_primary"
+                                source_desc = "Primary (Verified)"
+                            else:
+                                # Index > 0 = Fallback tag that worked
+                                tag_source = "learned_fallback"
+                                source_desc = f"Fallback (Option {i+1})"
+                                # Learn it for next time
                                 tag_manager.learn_successful_tag(entity, tags)
+                            
+                            logger.info(f"   📌 Tag source: {source_desc}")
+                            # ================================================================
                             
                             # Calculate metrics
                             density = count / area_km2 if area_km2 > 0 else 0
@@ -1071,7 +1128,9 @@ class DataScout:
                                     'bbox': bounding_box,
                                     'tag_dict': tags,
                                     'option_used': i + 1,
-                                    'total_options': len(tag_options)
+                                    'total_options': len(tag_options),
+                                    'tag_source': tag_source,      # NEW: verified_primary or learned_fallback
+                                    'source_desc': source_desc     # NEW: Human-readable description
                                 }
                             )
                         else:
