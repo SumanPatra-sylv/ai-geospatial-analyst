@@ -38,7 +38,7 @@ class SpatialConstraint(BaseModel):
     distance_meters: Optional[int] = Field(None, description="Optional distance in meters")
 
 class ParsedQuery(BaseModel):
-    target: str = Field(..., description="The main feature being analyzed")
+    target: Union[str, List[str]] = Field(..., description="The main feature(s) being analyzed - can be single or multiple targets")
     location: str = Field(..., description="Geographic location for the analysis")
     constraints: Optional[List[SpatialConstraint]] = Field(default=None, description="Optional list of spatial constraints")
     # This field is new, added to match the upgraded prompt
@@ -46,17 +46,17 @@ class ParsedQuery(BaseModel):
 
     @field_validator('target', mode='before')
     @classmethod
-    def normalize_target(cls, v):
+    def validate_target(cls, v):
         """
-        ENHANCEMENT: Support multi-target queries by converting lists to comma-separated string.
-        E.g., ["hospital", "metro_station", "drinking_fountain"] -> "hospital, metro_station, drinking_fountain"
+        ENHANCEMENT: Support multi-target queries natively.
+        - Lists are preserved as-is for native processing: ["hospital", "school"]
+        - Strings pass through unchanged: "hospital"
         
-        This allows the LLM to extract multiple targets, which we then process as a unified query.
-        Single targets pass through unchanged.
+        This allows the pipeline to handle multiple targets without flattening them into strings.
         """
         if isinstance(v, list):
-            # Join multiple targets with comma for unified processing
-            return ', '.join([str(item).strip() for item in v])
+            # Keep lists as lists for native multi-target processing
+            return v
         elif isinstance(v, str):
             return v.strip()
         else:

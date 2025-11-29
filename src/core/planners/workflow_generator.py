@@ -129,10 +129,17 @@ Based on the STATE TRANSITION RULES and MISSING DATA CHECK above, determine the 
         """Enhanced initial context with goal requirement analysis."""
         print("🛰️  Data Scout: Starting discovery and validation phase...")
         
-        # ✅ NEW: Analyze query requirements
-        self._analyze_query_requirements(parsed_query)
+        # === FIX: Handle Multi-Target properly BEFORE any processing ===
+        # Normalize target to a list (can be str or List[str])
+        primary_targets = parsed_query.target if isinstance(parsed_query.target, list) else [parsed_query.target]
+        target_display = ', '.join(primary_targets) if isinstance(primary_targets, list) else primary_targets
+        constraint_features = [c.feature_type for c in parsed_query.constraints] if parsed_query.constraints else []
         
-        entities_to_probe = [parsed_query.target] + [c.feature_type for c in parsed_query.constraints]
+        entities_to_probe = primary_targets + constraint_features
+        # =========================================
+        
+        # ✅ NEW: Analyze query requirements (pass normalized targets)
+        self._analyze_query_requirements(parsed_query, primary_targets)
         
         try:
             report = self.data_scout.generate_data_reality_report(
@@ -154,16 +161,16 @@ Based on the STATE TRANSITION RULES and MISSING DATA CHECK above, determine the 
                     "rag_guidance": rag_guidance
                 }
 
-            # Check if primary target exists
+            # Check if primary target(s) exist
             primary_target_found = any(
-                probe.original_entity == parsed_query.target and probe.count > 0
+                probe.original_entity in primary_targets and probe.count > 0
                 for probe in report.probe_results
             )
 
             if not primary_target_found:
                 return {
                     "success": False,
-                    "error": f"The primary target '{parsed_query.target}' has 0 features at the specified location.",
+                    "error": f"The primary target(s) '{target_display}' have 0 features at the specified location.",
                     "rag_guidance": rag_guidance
                 }
 
@@ -171,7 +178,7 @@ Based on the STATE TRANSITION RULES and MISSING DATA CHECK above, determine the 
                 "success": True,
                 "data_report": report,
                 "rag_guidance": rag_guidance,
-                "original_query": f"Find {parsed_query.target} in {parsed_query.location}",
+                "original_query": f"Find {target_display} in {parsed_query.location}",
                 "initial_observation": self._format_initial_observation(report)
             }
 
@@ -255,23 +262,26 @@ Based on the STATE TRANSITION RULES and MISSING DATA CHECK above, determine the 
             )
 
     # ✅ NEW: Goal requirement analysis
-    def _analyze_query_requirements(self, parsed_query: ParsedQuery) -> None:
+    def _analyze_query_requirements(self, parsed_query: ParsedQuery, primary_targets: List[str]) -> None:
         """Enhanced query requirement analysis with precise constraint detection."""
         
-        # ✅ FIX: Use ParsedQuery as ground truth, not string analysis
+        # === FIX: Handle both single and multi-target properly ===
+        # primary_targets is already a list from get_initial_context
+        target_str = ', '.join(primary_targets) if isinstance(primary_targets, list) else str(primary_targets)
+        
         self.query_requirements = {
-            'primary_target': parsed_query.target.lower(),
+            'primary_target': target_str.lower(),
             'needs_constraints': bool(parsed_query.constraints),
-            'constraint_features': [c.feature_type.lower() for c in parsed_query.constraints],
+            'constraint_features': [c.feature_type.lower() for c in parsed_query.constraints] if parsed_query.constraints else [],
             'needs_spatial_analysis': any(
                 c.relationship.name in ['NEAR', 'WITHIN', 'INTERSECTS'] 
-                for c in parsed_query.constraints
+                for c in (parsed_query.constraints or [])
             ),
             'needs_filtering': any(
                 hasattr(c, 'attribute_filter') and c.attribute_filter 
-                for c in parsed_query.constraints
+                for c in (parsed_query.constraints or [])
             ),
-            'query_text': f"Find {parsed_query.target} in {parsed_query.location}".lower()
+            'query_text': f"Find {target_str} in {parsed_query.location}".lower()
         }
         
         print(f"🎯 Query Requirements Analysis: {self.query_requirements}")

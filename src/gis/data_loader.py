@@ -35,9 +35,9 @@ class LoaderConfig:
     """Enhanced configuration for SmartDataLoader with validation."""
     base_data_dir: str = "data"
     max_retries: int = 3
-    connection_timeout: float = 30.0  # Time to establish a connection
-    read_timeout: int = 180           # Time to wait for a response (must be an integer)
-    max_memory_usage_mb: int = 1024   # Memory limit for Overpass
+    connection_timeout: float = 30.0    # Time to establish a connection
+    read_timeout: int = 180             # Time to wait for a response: 180 seconds (3 mins) for large cities
+    max_memory_usage_mb: int = 1024     # Memory limit for Overpass
     cache_max_age_days: int = 30
     cache_max_size_gb: float = 5.0
     enable_metadata_tracking: bool = True
@@ -53,8 +53,6 @@ class LoaderConfig:
     # Advanced options
     enable_parallel_fetching: bool = False
     max_workers: int = 4
-    connection_timeout: float = 30.0
-    read_timeout: float = 300.0
     enable_logging: bool = True
     log_level: str = "INFO"
     

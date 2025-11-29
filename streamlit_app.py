@@ -365,19 +365,29 @@ with viz_col:
                             count = getattr(metrics, "total_count", None) or getattr(metrics, "successful_actions", "N/A")
                 
                 # Check if we have split counts (named vs all)
-                # This would be in the probe_results metadata
+                # For multi-target queries, sum all probe results
                 probe_results = result.get("probe_results", [])
                 if probe_results and len(probe_results) > 0:
-                    probe = probe_results[0]
-                    if hasattr(probe, 'count_named') and probe.count_named is not None:
-                        count = str(probe.count_named)
-                        if probe.count_all is not None:
+                    # Multi-target: sum all probe counts
+                    total_named = sum(getattr(p, 'count_named', 0) or 0 for p in probe_results)
+                    total_all = sum(getattr(p, 'count_all', 0) or 0 for p in probe_results)
+                    
+                    # If count not extracted from reason string, use probe sum
+                    if count == "N/A":
+                        count = str(total_named) if total_named > 0 else str(total_all)
+                    
+                    # Show detailed breakdown for multi-target
+                    if len(probe_results) > 1:
+                        count_detail = f"Multi-target: Total Named: {total_named}, All including unnamed: {total_all}"
+                        st.metric("Result Count", count, delta=count_detail)
+                    else:
+                        # Single target with named/all split
+                        probe = probe_results[0]
+                        if hasattr(probe, 'count_all') and probe.count_all is not None and probe.count_all != probe.count_named:
                             count_detail = f"(Named: {probe.count_named}, All including unnamed: {probe.count_all})"
                             st.metric("Result Count", count, delta=count_detail)
                         else:
                             st.metric("Result Count", count)
-                    else:
-                        st.metric("Result Count", count)
                 else:
                     st.metric("Result Count", count)
                 

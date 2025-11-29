@@ -471,9 +471,10 @@ class MasterOrchestrator:
             # Update orchestrator state
             self.data_layers = result["final_layers"]
             
-            # Extract finish_task's parameters_hint for UI consumption
+            # Extract finish_task's parameters_hint and probe_results for UI consumption
             finish_task = next((t for t in task_queue.tasks if t.tool_name == "finish_task"), None)
             finish_task_parameters_hint = finish_task.parameters_hint if finish_task else {}
+            probe_results_data = context.get('data_report', {}).probe_results if context else []
             
         except Exception as e:
             print(f"❌ Task queue execution failed: {e}")
@@ -559,6 +560,9 @@ class MasterOrchestrator:
             
             # === STREAMLIT UI FIX: Pass finish_task parameters_hint for count extraction ===
             "parameters_hint": finish_task_parameters_hint,
+            
+            # === STREAMLIT UI FIX: Pass probe_results for massive dataset count extraction ===
+            "probe_results": probe_results_data,
             
             # Architecture metadata
             "architecture": "task_queue",

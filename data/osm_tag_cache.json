@@ -33,5 +33,15 @@
     {
       "aeroway": "helipad"
     }
+  ],
+  "bus stop": [
+    {
+      "highway": "bus_stop"
+    }
+  ],
+  "bus_stop": [
+    {
+      "highway": "bus_stop"
+    }
   ]
 }

@@ -89,8 +89,14 @@ class ExecutionPlanner:
         """
         Generate a complete task queue.
         Includes STATISTICAL SHORTCUT to prevent massive downloads for simple questions.
+        Supports multi-target queries natively.
         """
-        logger.info(f"🎯 Planning task queue for: {parsed_query.target} in {parsed_query.location}")
+        # === FIX: Handle Multi-Target properly ===
+        targets = parsed_query.target if isinstance(parsed_query.target, list) else [parsed_query.target]
+        targets_str = ', '.join(targets) if isinstance(targets, list) else targets
+        # =========================================
+        
+        logger.info(f"🎯 Planning task queue for: {targets_str} in {parsed_query.location}")
         
         self.task_counter = 0
         tasks: List[ExecutionTask] = []
@@ -98,52 +104,71 @@ class ExecutionPlanner:
         # Analyze requirements
         requirements = self._analyze_requirements(parsed_query)
         
+        # === MASSIVE DATASET PROTECTION ===
+        # Calculate total count across all targets
+        total_count = sum(r.count for r in data_report.probe_results 
+                         if any(t.lower() in r.original_entity.lower() for t in targets))
+        
+        SAFETY_THRESHOLD = 50000  # Increased from 10k to allow moderate datasets (like 2k-10k) to generate maps
+        is_massive = total_count > SAFETY_THRESHOLD
+        
+        # If MASSIVE (> 50k), ALWAYS shortcut to avoid timeout - don't attempt download
+        if is_massive:
+            logger.info(f"⚡ SHORTCUT: Massive dataset detected ({total_count} > {SAFETY_THRESHOLD}). Skipping heavy download to prevent timeout.")
+            
+            finish_task = ExecutionTask(
+                id="task_1",
+                task_type=TaskType.FINISH,
+                tool_name="finish_task",
+                instruction=f"Answer the user directly using the probe data.",
+                parameters_hint={
+                    "final_layer_name": None,
+                    "reason": f"Found {total_count} features. Skipping map download to prevent API timeout (Threshold: {SAFETY_THRESHOLD})."
+                }
+            )
+            
+            return TaskQueue(
+                tasks=[finish_task],
+                original_query=f"Find {targets_str}",
+                requirements=requirements
+            )
+        
         # === INTELLIGENT SHORTCUT: PURE COUNTING ===
-        # If user asks "How many?" (summary_required) AND we don't need spatial math
+        # If user asks "How many?" (summary_required) AND we don't need spatial math AND count is moderate
         if parsed_query.summary_required and not requirements['needs_spatial_analysis']:
+            logger.info(f"⚡ SHORTCUT: Statistical query with moderate count ({total_count}). Skipping map generation.")
             
-            # Find count in report
-            target_count = 0
-            for probe in data_report.probe_results:
-                if parsed_query.target.lower() in probe.original_entity.lower():
-                    target_count = probe.count
-                    if target_count > 0: break
+            finish_task = ExecutionTask(
+                id="task_1",
+                task_type=TaskType.FINISH,
+                tool_name="finish_task",
+                instruction=f"Answer the user directly using the probe data.",
+                parameters_hint={
+                    "final_layer_name": None,
+                    "reason": f"Found {total_count} features. Statistical query satisfied without map."
+                }
+            )
             
-            # Increase threshold to 10,000 so moderate result sets (like 1,465 lakes) get a map
-            SAFETY_THRESHOLD = 10000
-            is_massive = target_count > SAFETY_THRESHOLD
-            
-            if not is_massive:
-                logger.info(f"⚡ SHORTCUT: Statistical query detected. Found count {target_count}.")
-                
-                finish_task = ExecutionTask(
-                    id="task_1",
-                    task_type=TaskType.FINISH,
-                    tool_name="finish_task",
-                    instruction=f"Answer the user directly using the probe data.",
-                    parameters_hint={
-                        "final_layer_name": "N/A (Statistical Result)",
-                        "reason": f"According to OpenStreetMap, there are {target_count} named {parsed_query.target}s in {parsed_query.location}."
-                    }
-                )
-                
-                return TaskQueue(
-                    tasks=[finish_task],
-                    original_query=f"Count {parsed_query.target}",
-                    requirements=requirements
-                )
-            else:
-                logger.info(f"ℹ️ Result set {target_count} exceeds threshold {SAFETY_THRESHOLD}. Generating map instead of shortcut.")
+            return TaskQueue(
+                tasks=[finish_task],
+                original_query=f"Count {targets_str}",
+                requirements=requirements
+            )
         # ===========================================
         
-        # Step 1: Load primary target data
-        primary_task = self._create_load_task(
-            entity=parsed_query.target,
-            location=parsed_query.location,
-            data_report=data_report
-        )
-        tasks.append(primary_task)
-        logger.info(f"  ✅ {primary_task.id}: Load primary target ({parsed_query.target})")
+        # === PHASE 1: LOAD DATA (Loop through ALL targets) ===
+        created_layers = []
+        
+        for i, target in enumerate(targets):
+            load_task = self._create_load_task(
+                entity=target,
+                location=parsed_query.location,
+                data_report=data_report
+            )
+            tasks.append(load_task)
+            created_layers.append(load_task.output_layer_name)
+            logger.info(f"  ✅ {load_task.id}: Load {target} data")
+        # ====================================================
         
         # Step 2: Handle constraints (if any)
         if parsed_query.constraints:
@@ -151,19 +176,20 @@ class ExecutionPlanner:
                 parsed_query.constraints,
                 parsed_query.location,
                 data_report,
-                primary_task_id=primary_task.id
+                primary_task_id=tasks[0].id  # Reference first target task
             )
             tasks.extend(constraint_tasks)
         
         # Step 3: Add finish task
-        final_layer = tasks[-1].output_layer_name if tasks else primary_task.output_layer_name
+        # For multi-target queries without constraints, just use the last loaded layer
+        final_layer = created_layers[-1] if created_layers else None
         finish_task = self._create_finish_task(final_layer)
         tasks.append(finish_task)
         logger.info(f"  ✅ {finish_task.id}: Finish with result layer")
         
         task_queue = TaskQueue(
             tasks=tasks,
-            original_query=f"Find {parsed_query.target} in {parsed_query.location}",
+            original_query=f"Find {targets_str} in {parsed_query.location}",
             requirements=requirements
         )
         
@@ -172,8 +198,9 @@ class ExecutionPlanner:
     
     def _analyze_requirements(self, parsed_query: ParsedQuery) -> Dict[str, Any]:
         """Analyze what the query needs."""
+        targets = parsed_query.target if isinstance(parsed_query.target, list) else [parsed_query.target]
         return {
-            'primary_target': parsed_query.target,
+            'primary_target': targets,  # Now a list
             'needs_constraints': bool(parsed_query.constraints),
             'constraint_count': len(parsed_query.constraints) if parsed_query.constraints else 0,
             'needs_spatial_analysis': any(
